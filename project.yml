@@ -32,15 +32,22 @@ targets:
       - path: Sources
     dependencies:
       - package: FluidAudio
+    # Info.plist를 XcodeGen이 생성(권한 문구 등 커스텀 키 포함).
+    # GENERATE_INFOPLIST_FILE는 일부 표준 키만 매핑하므로, NSAudioCaptureUsageDescription 같은
+    # 키는 누락된다 → 명시적 info 파일로 모든 권한 문구를 보장한다.
+    info:
+      path: Info.plist
+      properties:
+        # 메뉴바 전용 앱 — Dock 아이콘 없음
+        LSUIElement: true
+        # 마이크 권한 사용 문구 (M1 오디오 캡처에서 사용)
+        NSMicrophoneUsageDescription: "실시간 번역을 위해 마이크 입력을 사용합니다"
+        # 시스템 오디오 직접 캡처 권한 문구 (M1c, Core Audio Process Tap, macOS 14.4+ TCC)
+        # 첫 tap 생성 시 OS가 이 문구로 캡처 권한을 묻는다(화면 녹화 권한 불필요).
+        NSAudioCaptureUsageDescription: "실시간 번역을 위해 시스템에서 재생되는 오디오를 캡처합니다"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.altimedia.liveTranslate
         PRODUCT_NAME: liveTranslate
-        # Info.plist를 INFOPLIST_KEY_* 설정으로부터 자동 생성
-        GENERATE_INFOPLIST_FILE: "YES"
-        # 메뉴바 전용 앱 — Dock 아이콘 없음
-        INFOPLIST_KEY_LSUIElement: "YES"
-        # 마이크 권한 사용 문구 (M1 오디오 캡처에서 사용)
-        INFOPLIST_KEY_NSMicrophoneUsageDescription: "실시간 번역을 위해 마이크 입력을 사용합니다"
         ENABLE_HARDENED_RUNTIME: "YES"
         SWIFT_STRICT_CONCURRENCY: complete

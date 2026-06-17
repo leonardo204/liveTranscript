@@ -6,7 +6,18 @@ enum AudioSourceKind: Sendable, Equatable {
     case microphone
     /// BlackHole 등 가상 루프백 입력 장치(시스템 소리 캡처).
     case loopback
-    /// Core Audio Tap 시스템 직접 캡처(M1c 예정).
+    /// Core Audio Tap 시스템 직접 캡처(M1c).
+    case systemTap
+}
+
+/// 사용자/자동 입력 소스 선택 (스펙 §5.2 자동 선택 규칙).
+///
+/// - `.auto`: 앱이 판별 — BlackHole 감지 시 BlackHole, 없고 14.4+면 시스템 Tap, 둘 다 아니면 기본 입력.
+/// - `.device(uid)`: 특정 입력 장치(마이크/BlackHole)를 수동 강제.
+/// - `.systemTap`: Core Audio Tap 시스템 직접 캡처를 수동 강제(14.4+에서만).
+enum InputSelection: Sendable, Equatable {
+    case auto
+    case device(String)
     case systemTap
 }
 

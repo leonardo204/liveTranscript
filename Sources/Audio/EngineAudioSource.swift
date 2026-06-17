@@ -185,6 +185,19 @@ enum AudioSourceError: Error, LocalizedError {
     case converterUnavailable
     case deviceSelectionFailed(OSStatus)
     case permissionDenied
+    // MARK: - System Tap (M1c)
+    /// macOS 14.4 미만 — Core Audio Process Tap 미지원.
+    case systemTapUnavailable
+    /// AudioHardwareCreateProcessTap 실패(권한 거부/대기 포함 가능).
+    case systemTapCreationFailed(OSStatus)
+    /// AudioHardwareCreateAggregateDevice 실패.
+    case systemTapAggregateFailed(OSStatus)
+    /// kAudioTapPropertyFormat 읽기 실패.
+    case systemTapFormatFailed(OSStatus)
+    /// AudioDeviceCreateIOProcIDWithBlock 실패.
+    case systemTapIOProcFailed(OSStatus)
+    /// AudioDeviceStart 실패.
+    case systemTapStartFailed(OSStatus)
 
     var errorDescription: String? {
         switch self {
@@ -196,6 +209,18 @@ enum AudioSourceError: Error, LocalizedError {
             return "입력 장치 선택 실패 (OSStatus \(status))."
         case .permissionDenied:
             return "마이크 권한이 거부되었습니다. 시스템 설정에서 허용해 주세요."
+        case .systemTapUnavailable:
+            return "시스템 오디오 직접 캡처는 macOS 14.4 이상이 필요합니다. BlackHole 설치를 권장합니다."
+        case .systemTapCreationFailed:
+            return "시스템 오디오 캡처 권한이 필요합니다. 시스템 설정에서 허용해 주세요."
+        case .systemTapAggregateFailed(let status):
+            return "시스템 오디오 캡처 장치 생성 실패 (OSStatus \(status))."
+        case .systemTapFormatFailed(let status):
+            return "시스템 오디오 포맷을 읽을 수 없습니다 (OSStatus \(status))."
+        case .systemTapIOProcFailed(let status):
+            return "시스템 오디오 IO 등록 실패 (OSStatus \(status))."
+        case .systemTapStartFailed(let status):
+            return "시스템 오디오 캡처 시작 실패 (OSStatus \(status))."
         }
     }
 }

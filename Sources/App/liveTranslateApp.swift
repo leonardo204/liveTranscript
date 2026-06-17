@@ -36,6 +36,29 @@ private struct MenuBarContent: View {
                 audio.refreshDevices()
             }
             Divider()
+
+            // 자동 선택(스펙 §5.2 기본값): BlackHole 우선 → 시스템 Tap → 기본 입력.
+            Button {
+                audio.selectAuto()
+            } label: {
+                let mark = audio.selection == .auto ? "✓ " : "   "
+                Text("\(mark)자동 (\(audio.activeSourceLabel))")
+            }
+
+            // 시스템 오디오 직접 캡처 (Core Audio Tap, 14.4+에서만 활성).
+            Button {
+                audio.selectSystemTap()
+            } label: {
+                let mark = audio.selection == .systemTap ? "✓ " : "   "
+                Text("\(mark)시스템 오디오 (직접 캡처)")
+            }
+            .disabled(!audio.systemTapAvailable)
+            .help(audio.systemTapAvailable
+                  ? "추가 설치 없이 시스템 소리를 직접 캡처합니다 (macOS 14.4+)"
+                  : "macOS 14.4 미만 — BlackHole 설치가 필요합니다")
+
+            Divider()
+
             if audio.devices.isEmpty {
                 Text("입력 장치 없음")
             } else {
@@ -43,7 +66,7 @@ private struct MenuBarContent: View {
                     Button {
                         audio.selectDevice(device)
                     } label: {
-                        let selected = audio.selectedDevice?.uid == device.uid
+                        let selected = audio.selection == .device(device.uid)
                         let mark = selected ? "✓ " : "   "
                         let tag = device.isLikelyLoopback ? " (루프백)" : ""
                         Text("\(mark)\(device.name)\(tag)")
@@ -73,7 +96,7 @@ private struct MenuBarContent: View {
         // 레벨 미터 — 캡처 중일 때 입력 소리에 반응.
         if audio.isCapturing {
             Text("입력 레벨: \(LevelMeter.bar(for: audio.level))")
-            Text("선택: \(audio.selectedDevice?.name ?? "기본 입력")")
+            Text("선택: \(audio.activeSourceLabel)")
         } else {
             Text("캡처 정지됨")
         }

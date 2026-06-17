@@ -8,8 +8,9 @@ Secrets.plist
 # macOS
 .DS_Store
 
-# Xcode / Swift (XcodeGen: .xcodeproj는 생성물 → 전체 무시, project.yml만 커밋)
+# Xcode / Swift (XcodeGen: .xcodeproj/Info.plist는 생성물 → 무시, project.yml만 커밋)
 *.xcodeproj/
+/Info.plist
 xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
