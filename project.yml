@@ -1,0 +1,37 @@
+name: liveTranslate
+
+options:
+  bundleIdPrefix: com.altimedia
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    # M0: 로컬 개발 빌드 — 서명/공증은 M6에서 처리
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  liveTranslate:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.altimedia.liveTranslate
+        PRODUCT_NAME: liveTranslate
+        # Info.plist를 INFOPLIST_KEY_* 설정으로부터 자동 생성
+        GENERATE_INFOPLIST_FILE: "YES"
+        # 메뉴바 전용 앱 — Dock 아이콘 없음
+        INFOPLIST_KEY_LSUIElement: "YES"
+        # 마이크 권한 사용 문구 (M1 오디오 캡처에서 사용)
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "실시간 번역을 위해 마이크 입력을 사용합니다"
+        ENABLE_HARDENED_RUNTIME: "YES"
+        SWIFT_STRICT_CONCURRENCY: complete
