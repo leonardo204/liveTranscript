@@ -15,6 +15,11 @@ enum AppConfig {
     static let audioSampleRate: Double = 16_000
     static let audioChunkMilliseconds: Int = 100
 
+    /// 100ms 청크당 샘플 수 = 16000 * 0.1 = 1600 (16kHz mono Float32).
+    /// 파이프라인 내부 처리 단위(§4.1, §5.2). Gemini 송신 시 Int16 LE로 변환은 M2 담당.
+    static let audioChunkSampleCount: Int =
+        Int(audioSampleRate * Double(audioChunkMilliseconds) / 1000.0)
+
     /// 개발용 .env 경로를 강제 지정하는 환경변수 이름.
     static let envPathOverrideKey = "LIVETRANSLATE_ENV_PATH"
 }
