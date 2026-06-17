@@ -11,10 +11,11 @@ settings:
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
+    # 서명: 개인 팀 자동 서명. project.yml에 고정하여 xcodegen 재생성에도 유지됨.
+    # (Xcode UI에서 바꾼 설정은 .xcodeproj=생성물이라 다음 generate 때 사라지므로 여기서 관리)
     CODE_SIGN_STYLE: Automatic
-    # M0: 로컬 개발 빌드 — 서명/공증은 M6에서 처리
-    CODE_SIGNING_REQUIRED: "NO"
-    CODE_SIGN_IDENTITY: ""
+    DEVELOPMENT_TEAM: XU8HS9JUTS
+    CODE_SIGN_IDENTITY: "Apple Development"
 
 targets:
   liveTranslate:
