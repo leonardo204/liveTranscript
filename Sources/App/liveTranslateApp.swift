@@ -101,12 +101,25 @@ private struct MenuBarContent: View {
             Text("캡처 정지됨")
         }
 
+        // 권한 거부 등 오류는 클릭하면 해당 시스템 설정 창이 열리도록 한다(피드백 #3).
         if let error = audio.lastErrorMessage {
-            Text("⚠️ \(error)")
+            Button("⚠️ \(error)") {
+                openSettingsForError()
+            }
+        }
+
+        Divider()
+
+        // 미니 HUD(플로팅 모니터) 표시 토글 (피드백 #1).
+        Button {
+            appState.toggleMonitor()
+        } label: {
+            let mark = appState.hud.isVisible ? "✓ " : "   "
+            Text("\(mark)모니터 표시")
         }
 
         Button("설정…") {
-            // TODO(M4): SettingsStore 기반 설정 창 표시
+            appState.openSettings()
         }
 
         Divider()
@@ -120,6 +133,21 @@ private struct MenuBarContent: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    /// 캡처 오류 항목 클릭 시: 마이크/시스템 오디오 권한 거부면 해당 설정 pane을 직접 연다.
+    /// 그 외 오류는 설정 창을 띄워 권한 섹션에서 상태를 확인하게 한다(피드백 #3).
+    private func openSettingsForError() {
+        let audio = appState.audio
+        if case .systemTap = audio.effectiveSelection {
+            PermissionHelper.openSystemAudioSettings()
+            return
+        }
+        if PermissionHelper.microphoneStatus().needsAction {
+            PermissionHelper.openMicrophoneSettings()
+        } else {
+            appState.openSettings()
+        }
     }
 }
 

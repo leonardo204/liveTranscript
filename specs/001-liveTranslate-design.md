@@ -223,6 +223,7 @@
 | **M1a** 오디오 파이프라인 | `AudioSource` 프로토콜 + 마이크/BlackHole 캡처(AVAudioEngine, 입력장치 선택), 16k mono Float32 변환, 100ms 청크, 메뉴바 소스선택+레벨미터 | 마이크/BlackHole 캡처 레벨미터 확인 |
 | **M1b** VAD 게이트 | FluidAudio SPM 통합, Silero VAD 스트리밍, 발화 구간만 통과(모델 번들 동봉) | 음악/소음 구간 송신 차단 확인 |
 | **M1c** 시스템 오디오 직접 캡처 | Core Audio Tap(14.4+) `AudioSource` 구현 + 자동선택(BlackHole 없으면 Tap) | 무설치 환경 시스템 소리 캡처 확인 |
+| **M1.5** UX 개선 | 미니 HUD(상시 플로팅: 레벨·VAD·캡처상태·입력소스), 설정 창 동작, 권한 거부 시 시스템 설정 deep link | HUD 상시 표시·설정창·권한 열기 동작 |
 | **M2** Gemini Live 연동 | GeminiLiveClient, setup/송신/수신, 콘솔 자막 | 영어 음성 → 한국어 텍스트 콘솔 출력 |
 | **M3** 오버레이 자막 | OverlayWindow + SubtitleEngine, 페이드 표시 | 화면 위 자막 실시간 표시 |
 | **M4** 스타일 설정 | SettingsStore + 설정 UI + 실시간 미리보기 | 폰트/색/글로우 변경 즉시 반영 |
