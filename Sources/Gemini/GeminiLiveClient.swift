@@ -46,13 +46,19 @@ actor GeminiLiveClient {
     private let model: String
     private let targetLanguageCode: String
 
-    /// 재연결 백오프(초). 끊길 때마다 증가, 연결 성공 시 리셋.
+    /// 재연결 백오프(초). 끊길 때마다 증가, setupComplete 수신 시 리셋.
     private var reconnectDelay: TimeInterval = 1.0
     private let maxReconnectDelay: TimeInterval = 30.0
 
-    /// translationConfig 위치 폴백 플래그.
-    /// 서버가 top-level translationConfig를 거부하면 generationConfig 내부로 재시도한다(스펙 주의).
-    private var useNestedTranslationConfig = false
+    /// setupComplete를 한 번이라도 받기 전까지의 연속 연결 실패 횟수.
+    /// 이 값이 maxConnectAttempts를 넘으면 영구 실패로 간주하고 재연결을 멈춘다.
+    private var connectAttempts = 0
+    private let maxConnectAttempts = 5
+
+    /// translationConfig 위치. 직접 WebSocket 테스트로 확인됨:
+    /// top-level은 서버가 1007("Unknown name translationConfig at 'setup'")로 거부하고,
+    /// generationConfig 내부에 두어야 setupComplete를 받는다. 따라서 nested가 기본.
+    private var useNestedTranslationConfig = true
 
     // MARK: - 런타임 상태
 
@@ -69,6 +75,16 @@ actor GeminiLiveClient {
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
     private var receiveLoop: Task<Void, Never>?
+
+    /// 현재 task가 setup을 이미 보냈는지(didOpen 콜백에서 1회만 전송 보장).
+    private var setupSent = false
+
+    /// 현재 연결 세대(generation). 재연결마다 증가시켜, 이전 task의 지연된
+    /// delegate 콜백이 새 연결 상태를 오염시키지 않도록 식별한다.
+    private var generation = 0
+
+    /// WebSocket delegate(핸드셰이크/종료/에러 콜백 수신). 세션과 수명을 같이한다.
+    private var delegate: WebSocketDelegate?
 
     /// 이벤트 스트림 continuation. connect 시 생성된다.
     private var continuation: AsyncStream<Event>.Continuation?
@@ -105,6 +121,7 @@ actor GeminiLiveClient {
     /// 연결을 종료한다(사용자 정지). 재연결하지 않는다.
     func stop() {
         stopped = true
+        generation += 1   // 이전 task의 지연 콜백 무효화
         teardownSocket()
         state = .disconnected
         continuation?.finish()
@@ -136,29 +153,42 @@ actor GeminiLiveClient {
     private func openSocket() {
         guard !stopped else { return }
         state = .connecting
+        setupSent = false
 
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = true
-        let session = URLSession(configuration: config)
-        self.session = session
+        // 이전 세션 정리(재연결 시) 후 새 세대 시작.
+        teardownSocket()
+        generation += 1
+        let gen = generation
 
         guard let url = makeURL() else {
             state = .error("잘못된 엔드포인트 URL")
             return
         }
+
+        // delegate를 통해 핸드셰이크 완료(didOpen) / 종료(didClose) / 에러(didComplete)를 받는다.
+        // delegate는 actor를 weak로 잡고, 콜백 안에서 generation을 함께 넘겨 actor로 hop한다.
+        let delegate = WebSocketDelegate(client: self, generation: gen)
+        self.delegate = delegate
+
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = true
+        // delegateQueue를 nil로 두면 직렬 OperationQueue가 자동 생성된다.
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        self.session = session
+
         let task = session.webSocketTask(with: url)
         self.task = task
-        task.resume()
 
-        // setup 먼저 전송(첫 메시지).
-        sendSetup()
-
-        // 수신 루프 시작.
+        // 수신 루프 시작(handshake 전에 호출해도 receive는 메시지가 올 때까지 대기).
         receiveLoop?.cancel()
         receiveLoop = Task { [weak self] in
-            await self?.receiveMessages()
+            await self?.receiveMessages(generation: gen)
         }
-        log.info("WebSocket 연결 시도: \(self.maskedURLString, privacy: .public)")
+
+        // resume() — 여기서는 setup을 보내지 않는다.
+        // setup은 핸드셰이크(HTTP 101)가 끝난 뒤 delegate의 didOpen 콜백에서만 전송한다.
+        task.resume()
+        log.info("WebSocket 연결 시도(handshake 대기): \(self.maskedURLString, privacy: .public)")
     }
 
     private func teardownSocket() {
@@ -168,11 +198,22 @@ actor GeminiLiveClient {
         task = nil
         session?.invalidateAndCancel()
         session = nil
+        delegate = nil
+        setupSent = false
     }
 
-    /// setup 메시지를 전송한다(연결 직후 첫 메시지). 스펙 §5.1.
+    /// 핸드셰이크 완료(didOpen) 콜백 — actor로 hop되어 호출된다.
+    /// 여기서 비로소 setup(첫 메시지)을 전송한다. 늦게 도착한 이전 세대 콜백은 무시.
+    fileprivate func handleDidOpen(generation gen: Int) {
+        guard gen == generation, !stopped else { return }
+        log.info("WebSocket handshake 완료(didOpen) → setup 전송")
+        sendSetup()
+    }
+
+    /// setup 메시지를 전송한다(핸드셰이크 완료 후 첫 메시지). 스펙 §5.1.
     private func sendSetup() {
-        guard let task else { return }
+        guard let task, !setupSent else { return }
+        setupSent = true
         let setup = makeSetupMessage()
         guard let data = try? JSONEncoder().encode(setup),
               let json = String(data: data, encoding: .utf8) else {
@@ -188,11 +229,12 @@ actor GeminiLiveClient {
 
     // MARK: - 수신
 
-    private func receiveMessages() async {
+    private func receiveMessages(generation gen: Int) async {
         guard let task else { return }
         do {
             while !Task.isCancelled {
                 let message = try await task.receive()
+                guard gen == generation else { return }   // 세대 불일치 → 이전 task의 잔여 수신 무시
                 switch message {
                 case .string(let text):
                     if let data = text.data(using: .utf8) { handleServerData(data) }
@@ -203,9 +245,11 @@ actor GeminiLiveClient {
                 }
             }
         } catch {
-            // 취소가 아니면 연결 끊김 → 재연결.
-            if !Task.isCancelled {
-                await handleDisconnect(error)
+            // 취소가 아니면 연결 끊김.
+            // 단, 핸드셰이크 실패(4xx 등)는 delegate(didComplete)에서 일괄 처리하므로
+            // 여기서는 setup이 이미 전송된 정상 운영 중 끊김만 일반 재연결로 넘긴다.
+            if !Task.isCancelled, gen == generation {
+                await handleDisconnect(transient: setupSent)
             }
         }
     }
@@ -219,7 +263,9 @@ actor GeminiLiveClient {
         }
 
         if msg.setupComplete != nil {
+            // 연결 안정화 — 백오프/연속 실패 카운터를 리셋한다.
             reconnectDelay = 1.0
+            connectAttempts = 0
             state = .ready
             emit(.info("Gemini 연결됨 (setup 완료)"))
             return
@@ -257,20 +303,93 @@ actor GeminiLiveClient {
 
     private func handleSendError(_ error: Error) {
         guard !stopped else { return }
-        log.error("송신 오류 → 재연결 시도")
-        Task { await handleDisconnect(error) }
+        // 키가 섞일 수 있는 원문 대신 도메인/코드만 로깅.
+        let ns = error as NSError
+        log.error("송신 오류 (\(ns.domain, privacy: .public) \(ns.code)) → 재연결 시도")
+        // setup이 보내진 정상 운영 중 송신 실패만 일시적 끊김으로 본다.
+        Task { await handleDisconnect(transient: setupSent) }
     }
 
-    private func handleDisconnect(_ error: Error) async {
-        guard !stopped else { return }
-        // 에러 메시지에 URL/키가 섞일 수 있으므로 원문을 그대로 노출하지 않는다.
-        log.error("연결 끊김 → \(self.reconnectDelay, format: .fixed(precision: 1))s 후 재연결")
+    /// delegate(didCloseWith) 콜백 — 서버가 close frame으로 종료한 경우.
+    /// 정책 위반(policyViolation) 등은 영구 실패로 보고 재연결하지 않는다.
+    fileprivate func handleDidClose(generation gen: Int,
+                                    closeCode: URLSessionWebSocketTask.CloseCode,
+                                    reasonLength: Int) {
+        guard gen == generation, !stopped else { return }
+        log.error("WebSocket close 수신: code=\(closeCode.rawValue) reasonBytes=\(reasonLength)")
+
+        switch closeCode {
+        case .policyViolation, .unsupportedData, .invalidFramePayloadData:
+            // 인증/권한/잘못된 요청류 — 재시도해도 동일 실패. 멈춘다.
+            failPermanently("연결이 정책상 거부되었습니다 — API 키/모델 권한을 확인하세요 (close \(closeCode.rawValue))")
+        default:
+            Task { await handleDisconnect(transient: setupSent) }
+        }
+    }
+
+    /// delegate(didCompleteWithError) 콜백 — task 완료(에러 포함).
+    /// HTTP 응답이 있으면 상태코드로 핸드셰이크 실패 원인을 판별한다(키는 절대 노출 안 함).
+    fileprivate func handleDidComplete(generation gen: Int,
+                                       httpStatus: Int?,
+                                       errorDomain: String?,
+                                       errorCode: Int?) {
+        guard gen == generation, !stopped else { return }
+
+        if let status = httpStatus {
+            log.error("WebSocket 종료: HTTP status=\(status)")
+            // 핸드셰이크가 HTTP 4xx로 거부됨 → 키/모델/요청 문제. 재연결 무의미.
+            if (400...499).contains(status) {
+                let hint: String
+                switch status {
+                case 401, 403: hint = "API 키 또는 모델 접근 권한 문제"
+                case 404:      hint = "모델/엔드포인트를 찾을 수 없음"
+                case 429:      hint = "요청 한도 초과(rate limit)"
+                default:       hint = "잘못된 요청"
+                }
+                failPermanently("연결 거부 (HTTP \(status)) — \(hint)")
+                return
+            }
+        } else if let domain = errorDomain {
+            // 응답조차 못 받음(네트워크/소켓). 원문 대신 도메인/코드만.
+            log.error("WebSocket 종료: \(domain, privacy: .public) code=\(errorCode ?? 0)")
+        }
+
+        // setup 완료 전에 닫혔으면 핸드셰이크 실패로 간주(연속 실패 카운트 증가 경로).
+        Task { await handleDisconnect(transient: setupSent) }
+    }
+
+    /// 영구 실패 처리: 재연결을 멈추고 사용자에게 명확히 안내한다.
+    private func failPermanently(_ message: String) {
+        stopped = true
+        generation += 1
         teardownSocket()
-        state = .error("연결 끊김 — 재연결 중")
-        emit(.info("연결 끊김 — 재연결 중"))
+        log.error("영구 실패 — 재연결 중단: \(message, privacy: .public)")
+        state = .error(message)
+        emit(.info(message))
+    }
+
+    /// 연결 끊김 처리.
+    /// - Parameter transient: true면 일시적 끊김(정상 운영 중 순단) → 백오프 재연결.
+    ///   false면 핸드셰이크 단계 실패 → 연속 실패 카운트를 올리고 상한 초과 시 중단.
+    private func handleDisconnect(transient: Bool) async {
+        guard !stopped else { return }
+        teardownSocket()
+
+        if !transient {
+            connectAttempts += 1
+            if connectAttempts > maxConnectAttempts {
+                failPermanently("연결 실패 — API 키와 네트워크를 확인하세요 (\(maxConnectAttempts)회 연속 실패)")
+                return
+            }
+        }
 
         let delay = reconnectDelay
         reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
+        // 로그 폭주 방지: 간결한 1줄.
+        log.error("재연결 예약: \(delay, format: .fixed(precision: 1))s 후 (attempt \(self.connectAttempts))")
+        state = .error("연결 끊김 — 재연결 중")
+        emit(.info("연결 끊김 — 재연결 중"))
+
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         guard !stopped else { return }
         openSocket()
@@ -333,6 +452,70 @@ actor GeminiLiveClient {
             data.append(UInt8(truncatingIfNeeded: value >> 8))
         }
         return data
+    }
+}
+
+// MARK: - WebSocket Delegate (핸드셰이크/종료/에러 콜백)
+
+/// `URLSessionWebSocketDelegate` 구현.
+///
+/// 동시성: `URLSession`은 delegate 콜백을 임의 스레드(delegateQueue)에서 호출하므로
+/// 이 클래스는 actor와 분리된 `final class`로 둔다. actor는 `weak`로만 참조하고,
+/// 모든 콜백은 `Task { await client.xxx }`로 actor에 hop해 상태를 변경한다.
+/// 자체 가변 상태가 없고(불변 프로퍼티만) actor 경계를 넘기는 값은 전부 Sendable이다.
+/// `weak var`는 Sendable 합성을 막으므로 `@unchecked Sendable`로 표기한다 — 안전 근거:
+/// (1) client는 콜백마다 Task 캡처로 1회만 읽혀 actor로 hop된다, (2) 가변 공유 상태는
+/// actor 내부에만 있고 이 클래스는 그 상태를 직접 만지지 않는다.
+private final class WebSocketDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+
+    /// actor를 weak로 참조해 순환 참조를 피한다.
+    private weak var client: GeminiLiveClient?
+    /// 이 delegate가 담당하는 연결 세대. actor가 generation 일치 여부로 잔여 콜백을 거른다.
+    private let generation: Int
+
+    init(client: GeminiLiveClient, generation: Int) {
+        self.client = client
+        self.generation = generation
+    }
+
+    /// 핸드셰이크(HTTP 101) 완료 — 이 시점부터 send가 안전하다.
+    func urlSession(_ session: URLSession,
+                    webSocketTask: URLSessionWebSocketTask,
+                    didOpenWithProtocol protocol: String?) {
+        let gen = generation
+        Task { [weak client] in await client?.handleDidOpen(generation: gen) }
+    }
+
+    /// 서버가 close frame으로 종료.
+    func urlSession(_ session: URLSession,
+                    webSocketTask: URLSessionWebSocketTask,
+                    didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+                    reason: Data?) {
+        let gen = generation
+        let reasonLength = reason?.count ?? 0   // reason 본문은 키가 섞일 수 있어 길이만 넘긴다
+        Task { [weak client] in
+            await client?.handleDidClose(generation: gen,
+                                         closeCode: closeCode,
+                                         reasonLength: reasonLength)
+        }
+    }
+
+    /// task 완료(에러 포함). 핸드셰이크 실패 시 HTTP 응답 상태코드를 여기서 얻는다.
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        let gen = generation
+        // 키가 섞일 수 있는 URL/에러 원문 대신 상태코드/도메인+코드만 추출해 넘긴다.
+        let httpStatus = (task.response as? HTTPURLResponse)?.statusCode
+        let ns = error as NSError?
+        let errorDomain = ns?.domain
+        let errorCode = ns?.code
+        Task { [weak client] in
+            await client?.handleDidComplete(generation: gen,
+                                            httpStatus: httpStatus,
+                                            errorDomain: errorDomain,
+                                            errorCode: errorCode)
+        }
     }
 }
 
