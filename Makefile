@@ -11,8 +11,8 @@ gen:
 build: gen
 	xcodebuild -scheme $(SCHEME) -configuration $(CONFIG) build
 
-# 빌드 산출물 경로 출력
-app-path: gen
+# 빌드 산출물 경로 출력 (gen 의존성 없음 — gen의 stdout이 경로에 섞이지 않도록)
+app-path:
 	@xcodebuild -scheme $(SCHEME) -configuration $(CONFIG) \
 		-showBuildSettings 2>/dev/null \
 		| awk -F' = ' '/ BUILT_PRODUCTS_DIR /{d=$$2} / FULL_PRODUCT_NAME /{n=$$2} END{print d"/"n}'
