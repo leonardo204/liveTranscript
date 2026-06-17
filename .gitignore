@@ -1,0 +1,28 @@
+
+# Secrets — 절대 커밋 금지
+.env
+.env.*
+*.xcconfig.secret
+Secrets.plist
+
+# macOS
+.DS_Store
+
+# Xcode / Swift (XcodeGen: .xcodeproj는 생성물 → 전체 무시, project.yml만 커밋)
+*.xcodeproj/
+xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+.build/
+.swiftpm/
+*.resolved
+
+# Claude Code runtime
+.claude/db/context.db
+.claude/.ctx_state
+.claude/.backup-*
+.claude/.ralph_state
+.claude/.hud_cache
+.claude/.hook_feedback
+.claude/.project_root
+.claude/.messenger_enabled
