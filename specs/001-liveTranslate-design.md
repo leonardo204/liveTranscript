@@ -11,9 +11,9 @@
 | 항목 | 값 |
 |------|-----|
 | 핵심 엔진 | Google **Gemini 3.5 Live Translate** (`gemini-3.5-live-translate-preview`) |
-| 오디오 소스 | ① 시스템 출력 루프백(BlackHole) ② **ScreenCaptureKit 시스템 오디오 직접 캡처** ③ 마이크 |
+| 오디오 소스 | ① 시스템 출력 루프백(BlackHole) ② **Core Audio Tap 시스템 오디오 직접 캡처(macOS 14.4+)** ③ 마이크 |
 | 출력 | 화면 오버레이 자막 (영화 자막 스타일, 표시/페이드아웃) |
-| 플랫폼 | macOS **14+ (ScreenCaptureKit 오디오 캡처 요구)** |
+| 플랫폼 | macOS **14+** (시스템 오디오 직접 캡처는 14.4+, 그 이하는 BlackHole) |
 | 형태 | 경량 단일 네이티브 앱 — **메뉴바 상주(menu bar) 앱** |
 
 ---
@@ -24,7 +24,7 @@
 
 | ID | 요구사항 | 비고 |
 |----|----------|------|
-| FR-1 | 시스템 출력 오디오 캡처 — **자동 선택**: BlackHole 감지 시 사용, 없으면 ScreenCaptureKit 시스템 오디오 직접 캡처 | 추가 설치 없이도 동작 |
+| FR-1 | 시스템 출력 오디오 캡처 — **자동 선택**: BlackHole 감지 시 사용, 없으면 Core Audio Tap 직접 캡처(macOS 14.4+) | 추가 설치 없이도 동작 |
 | FR-2 | 마이크 입력을 직접 캡처 | 입력 소스 선택 UI 제공 |
 | FR-3 | 캡처 오디오를 Gemini Live로 스트리밍하여 실시간 번역 | WebSocket 양방향 |
 | FR-4 | 번역 대상 언어 설정 (기본: 한국어) | Gemini 지원 70+ 언어 중 선택 |
@@ -53,12 +53,12 @@
 | 레이어 | 기술 | 근거 |
 |--------|------|------|
 | 언어/UI | Swift 5.10+, SwiftUI (+ 일부 AppKit) | 네이티브 = 최고의 경량성, 단일 .app |
-| 오디오 캡처 | **AVAudioEngine**(마이크/BlackHole) + **ScreenCaptureKit**(시스템 오디오) | 환경에 따라 자동 선택 |
+| 오디오 캡처 | **AVAudioEngine**(마이크/BlackHole) + **Core Audio Tap**(시스템 오디오, 14.4+) | 환경에 따라 자동 선택 |
 | 메뉴바 UI | **NSStatusItem** + SwiftUI MenuBarExtra | 본체 윈도우 없는 상주 앱 |
 | 오버레이 창 | **NSWindow** (borderless, `.floating`/`screenSaver` level, clear, click-through) | 자막 오버레이의 표준 방식 |
 | 네트워크 | **URLSessionWebSocketTask** | 외부 의존성 없이 Live API WebSocket 연결 |
 | 오디오 변환 | AVAudioConverter | 입력 → 16kHz/16-bit/mono PCM 변환 |
-| **VAD(음성 감지)** | **Silero VAD (CoreML)** via FluidAudio SDK | 음악·소음 걸러 발화만 송신 → 비용↓ (§5.6) |
+| **VAD(음성 감지)** | **Silero VAD v6 (CoreML)** via FluidAudio SDK (`from: 0.12.4`) | 음악·소음 걸러 발화만 송신 → 비용↓ (§5.6) |
 | 키 저장 | Keychain Services | API 키 보안 |
 | 빌드 | XcodeGen + Xcode | dotclaude 컨벤션 정합 |
 
@@ -86,7 +86,7 @@
 │  │ mic/BH/SCK │              │ (URLSession) │  translation    │     API (WSS)
 │  └────────────┘              └──────┬───────┘  transcription  │
 │   ▲ 입력선택                         │ text events            │
-│   │ 마이크/BlackHole/ScreenCaptureKit ▼                        │
+│   │ 마이크/BlackHole/CoreAudioTap     ▼                        │
 │  ┌────────────┐              ┌──────────────┐                 │
 │  │ Settings   │              │ Subtitle     │                 │
 │  │ (스타일/언어)│ ──────────▶ │ Engine       │ (등장/페이드)    │
@@ -102,7 +102,7 @@
 
 ### 4.1 모듈 책임
 
-- **AudioInputManager**: 입력 소스 판별/선택(`AudioSource` 프로토콜: 마이크 · BlackHole · ScreenCaptureKit), PCM 수집, 16kHz mono 변환, 100ms 청크화. **VAD(Silero) 게이트**로 발화 구간만 통과.
+- **AudioInputManager**: 입력 소스 판별/선택(`AudioSource` 프로토콜: 마이크 · BlackHole · Core Audio Tap), PCM 수집, 16kHz mono **Float32** 변환, 100ms 청크화. **VAD(Silero) 게이트**로 발화 구간만 통과.
 - **GeminiLiveClient**: WebSocket 연결·setup 메시지 전송·오디오 청크 송신·수신 이벤트(번역/원문 transcription) 파싱·15분 세션 자동 재연결.
 - **SubtitleEngine**: 수신 텍스트를 자막 큐로 변환, 문장 분할·표시 시간 산정·페이드 타이밍 관리.
 - **OverlayWindow**: 투명·클릭통과·최상위 창에 스타일 적용된 자막 렌더링.
@@ -147,7 +147,9 @@
 
 - **시스템 소리 캡처 (자동 선택)**:
   - **(A) BlackHole 감지 시**: 입력 장치 목록에 BlackHole이 있으면 이를 캡처(사용자가 다중 출력 장치를 구성해 둔 환경). AVAudioEngine으로 처리.
-  - **(B) BlackHole 미설치 시**: **ScreenCaptureKit**로 시스템 오디오를 직접 캡처 — *추가 설치 불필요*. `SCStream`에 오디오 캡처 활성화(`capturesAudio`), 화면 콘텐츠는 사용하지 않음. **화면 녹화 권한**(`Screen Recording`) 필요.
+  - **(B) BlackHole 미설치 시**: **Core Audio Process Tap**(macOS 14.4+, `CATapDescription` + `AudioHardwareCreateProcessTap`)으로 시스템 오디오를 직접 캡처 — *추가 설치 불필요, 화면 녹화 권한 불필요*(오디오 캡처 권한만). 참고 구현: AudioCap/AudioTee.
+    - ※ 당초 ScreenCaptureKit을 검토했으나, 오디오-only 캡처 시 더미 비디오 캡처를 강제로 끼워야 하고 화면 녹화 권한이 필요해 부적합 → 오디오 전용인 본 앱은 Core Audio Tap이 정답.
+    - macOS 14.0~14.3 사용자는 Tap API 미지원 → BlackHole 안내로 폴백.
   - 앱은 두 경로를 자동 판별하고, 사용자에게 현재 사용 중인 캡처 방식을 표시. (수동 강제 선택도 허용)
 - **마이크**: 시스템 기본/선택 입력 장치 직접 캡처. `NSMicrophoneUsageDescription` 권한 필요.
 - **공통 파이프라인**: 소스 → (AVAudioEngine tap 또는 SCStream audio buffer) → AVAudioConverter로 16kHz/16-bit/mono PCM 변환 → 100ms 버퍼 누적 → GeminiLiveClient로 송신. 캡처 백엔드는 `AudioSource` 프로토콜로 추상화해 동일 파이프라인에 연결.
@@ -206,7 +208,7 @@
 |------|------|------|
 | **15분 세션 제한** | 장시간 사용 중 끊김 | 세션 만료 전 새 WebSocket 선제 연결 → 무중단 핸드오버. (필요 시 `sessionResumption` 활용) |
 | **종단 지연** | 자막이 영상보다 수 초 후행 | Live Translate 특성상 불가피 — UX로 "수 초 지연" 안내, 라이브 partial로 체감 단축 |
-| **루프백 설정 난이도** | 일반 사용자 진입장벽 | BlackHole 없으면 **ScreenCaptureKit 자동 폴백**으로 무설치 동작. BlackHole 사용자는 자동 감지 |
+| **루프백 설정 난이도** | 일반 사용자 진입장벽 | BlackHole 없으면 **Core Audio Tap(14.4+) 자동 폴백**으로 무설치 동작. BlackHole 사용자는 자동 감지 |
 | **전체화면 영상 위 표시** | 자막이 가려짐 | `collectionBehavior` + 적절한 window level |
 | **API 비용/키 관리** | 사용량 과금 (출력 오디오가 비용 ~85%, **§9 참조**) | 키 Keychain, VAD 무음 억제, 경제 모드(옵션 B), 비용 가시화·예산 한도 |
 | **무음/침묵 처리** | 불필요한 트래픽·비용 | 입력 VAD로 무음 시 송신 스킵 |
@@ -218,7 +220,9 @@
 | 단계 | 산출물 | 핵심 검증 |
 |------|--------|-----------|
 | **M0** 프로젝트 셋업 | XcodeGen 프로젝트, 앱 스캐폴드, 권한 설정 | 빈 앱 빌드/실행 |
-| **M1** 오디오 캡처+VAD | AudioInputManager(`AudioSource`: 마이크 · BlackHole · ScreenCaptureKit), 자동선택, 16k PCM 변환, **Silero VAD 게이트** | 3소스 캡처 + 음악/소음 구간 송신 차단 확인 |
+| **M1a** 오디오 파이프라인 | `AudioSource` 프로토콜 + 마이크/BlackHole 캡처(AVAudioEngine, 입력장치 선택), 16k mono Float32 변환, 100ms 청크, 메뉴바 소스선택+레벨미터 | 마이크/BlackHole 캡처 레벨미터 확인 |
+| **M1b** VAD 게이트 | FluidAudio SPM 통합, Silero VAD 스트리밍, 발화 구간만 통과(모델 번들 동봉) | 음악/소음 구간 송신 차단 확인 |
+| **M1c** 시스템 오디오 직접 캡처 | Core Audio Tap(14.4+) `AudioSource` 구현 + 자동선택(BlackHole 없으면 Tap) | 무설치 환경 시스템 소리 캡처 확인 |
 | **M2** Gemini Live 연동 | GeminiLiveClient, setup/송신/수신, 콘솔 자막 | 영어 음성 → 한국어 텍스트 콘솔 출력 |
 | **M3** 오버레이 자막 | OverlayWindow + SubtitleEngine, 페이드 표시 | 화면 위 자막 실시간 표시 |
 | **M4** 스타일 설정 | SettingsStore + 설정 UI + 실시간 미리보기 | 폰트/색/글로우 변경 즉시 반영 |
@@ -232,17 +236,17 @@
 ### 8.1 리스크
 - `gemini-3.5-live-translate-preview`는 **프리뷰** — API 스펙/모델명 변경 가능. 클라이언트의 setup/파싱을 설정화하여 대응.
 - 루프백 설정은 사용자 환경 의존 → 온보딩 품질이 채택률 좌우.
-- 시스템 오디오 직접 캡처(ScreenCaptureKit 등) 대안도 존재하나 권한·복잡도 증가 → 1차는 BlackHole 가이드 방식.
+- 시스템 오디오 직접 캡처(Core Audio Tap, 14.4+)는 화면 권한 불필요해 적합하나 저수준 API라 복잡 → M1c로 분리. 14.4 미만은 BlackHole 안내.
 
 ### 8.2 결정 사항 (검토 반영 완료)
 1. ✅ **앱 형태**: **메뉴바 상주 앱**으로 확정.
 2. ✅ **자막 표시**: **기본 번역만 + 설정에서 원문 토글**로 확정.
-3. ✅ **루프백 캡처**: **혼합/자동** — BlackHole 감지 시 사용, 없으면 ScreenCaptureKit 직접 캡처(무설치 동작).
+3. ✅ **루프백 캡처**: **혼합/자동** — BlackHole 감지 시 사용, 없으면 Core Audio Tap(14.4+) 직접 캡처(무설치 동작).
 
 ### 8.3 남은 결정 (구현 전 확인)
 1. **오디오 출력**: 자막 전용(번역 음성 미재생)으로 확정? 향후 "번역 음성 듣기" 옵션 필요 여부. (권고: 1차 미재생)
 2. **API 경로**: Gemini Developer API(AI Studio 키) vs Vertex AI(서비스 계정). (권고: 1차 AI Studio 키)
-3. **macOS 최소 버전**: ScreenCaptureKit 오디오 캡처 안정성 고려 시 macOS 14+ 권고 — 확정 필요.
+3. **macOS 최소 버전**: 앱 최소 macOS 14.0(마이크/BlackHole 동작). 시스템 오디오 직접 캡처는 Core Audio Tap이 요구하는 **14.4+** 에서만 — 14.0~14.3은 BlackHole 폴백. 확정 필요.
 
 ---
 
