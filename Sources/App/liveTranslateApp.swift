@@ -54,6 +54,22 @@ private struct MenuBarContent: View {
 
         Divider()
 
+        // VAD(음성 감지) on/off 토글 (M1b, 기본 on). 음악·소음·무음 송신 차단으로 비용 절감.
+        Toggle("음성 감지(VAD)", isOn: Binding(
+            get: { audio.vadEnabled },
+            set: { audio.vadEnabled = $0 }
+        ))
+
+        // VAD 모델 상태 + 발화중 표시.
+        if audio.vadEnabled {
+            Text(audio.vadStatus.menuLabel)
+            if audio.isCapturing, audio.vadStatus == .ready {
+                Text(audio.isSpeaking ? "● 발화 감지됨" : "○ 무음/대기")
+            }
+        }
+
+        Divider()
+
         // 레벨 미터 — 캡처 중일 때 입력 소리에 반응.
         if audio.isCapturing {
             Text("입력 레벨: \(LevelMeter.bar(for: audio.level))")
