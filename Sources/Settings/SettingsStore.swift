@@ -21,6 +21,8 @@ final class SettingsStore {
         static let monitorFrameX = "monitor.frame.x"
         static let monitorFrameY = "monitor.frame.y"
         static let monitorHasSavedPosition = "monitor.hasSavedPosition"
+        static let targetLanguageCode = "translate.targetLanguageCode"
+        static let showSourceText = "translate.showSourceText"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -34,6 +36,22 @@ final class SettingsStore {
         self.monitorEnabled = defaults.bool(forKey: Key.monitorEnabled)
         self.monitorAutoShowOnCapture = defaults.bool(forKey: Key.monitorAutoShowOnCapture)
         self.monitorHideOnStop = defaults.bool(forKey: Key.monitorHideOnStop)
+        self.targetLanguageCode =
+            defaults.string(forKey: Key.targetLanguageCode) ?? AppConfig.defaultTargetLanguageCode
+        self.showSourceText = defaults.bool(forKey: Key.showSourceText)
+    }
+
+    // MARK: - 번역 (M2a)
+
+    /// 번역 대상 언어 코드(BCP-47, 기본 ko). GeminiLiveClient setup에 사용.
+    /// 풍부한 언어 선택 UI는 M4 — 지금은 영속 값만 둔다.
+    var targetLanguageCode: String {
+        didSet { defaults.set(targetLanguageCode, forKey: Key.targetLanguageCode) }
+    }
+
+    /// 원문 동시 표시(FR-8, 기본 OFF — 번역만). HUD/메뉴 공통 참조.
+    var showSourceText: Bool {
+        didSet { defaults.set(showSourceText, forKey: Key.showSourceText) }
     }
 
     // MARK: - 미니 HUD(모니터) 정책

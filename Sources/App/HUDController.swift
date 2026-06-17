@@ -11,17 +11,19 @@ final class HUDController {
 
     private let audio: AudioInputManager
     private let settings: SettingsStore
+    private let subtitles: SubtitleEngine
     private var panel: FloatingPanel?
 
-    /// HUD 크기(고정). 스펙 권고 ~220×90.
-    private static let hudSize = NSSize(width: 220, height: 90)
+    /// HUD 크기(고정). M2a에서 번역 자막 줄 표시를 위해 높이 확장.
+    private static let hudSize = NSSize(width: 260, height: 140)
 
     /// 현재 HUD가 화면에 떠 있는지.
     private(set) var isVisible = false
 
-    init(audio: AudioInputManager, settings: SettingsStore) {
+    init(audio: AudioInputManager, settings: SettingsStore, subtitles: SubtitleEngine) {
         self.audio = audio
         self.settings = settings
+        self.subtitles = subtitles
     }
 
     /// HUD를 표시한다(없으면 생성). 마스터 토글(monitorEnabled)이 off면 무시.
@@ -79,7 +81,7 @@ final class HUDController {
     private func makePanel() -> FloatingPanel {
         let rect = NSRect(origin: .zero, size: Self.hudSize)
         let panel = FloatingPanel(contentRect: rect)
-        panel.setContent(MonitorHUD(audio: audio))
+        panel.setContent(MonitorHUD(audio: audio, subtitles: subtitles, settings: settings))
         panel.onMoved = { [weak self] origin in
             // 드래그 종료 시 위치 저장(화면 내부로 클램프한 값).
             guard let self else { return }

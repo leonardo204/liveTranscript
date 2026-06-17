@@ -110,6 +110,22 @@ private struct MenuBarContent: View {
 
         Divider()
 
+        // Gemini 번역 상태 (M2a). 키 미포함 라벨만 표시.
+        Text("번역 상태: \(appState.geminiStatus)")
+
+        // 번역 자막 현재 줄(최근 1줄) — 메뉴에서도 흐름 확인.
+        if !appState.subtitles.displayTranslation.isEmpty {
+            Text("자막: \(appState.subtitles.displayTranslation)")
+        }
+
+        // 원문 동시 표시 토글 (FR-8, 기본 OFF).
+        Toggle("원문 동시 표시", isOn: Binding(
+            get: { appState.settings.showSourceText },
+            set: { appState.settings.showSourceText = $0 }
+        ))
+
+        Divider()
+
         // 미니 HUD(플로팅 모니터) 표시 토글 (피드백 #1).
         Button {
             appState.toggleMonitor()

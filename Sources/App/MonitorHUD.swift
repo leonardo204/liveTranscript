@@ -11,16 +11,22 @@ import SwiftUI
 /// `animation`으로 바를 매끄럽게 보간한다(과한 재드로우 없이).
 struct MonitorHUD: View {
     var audio: AudioInputManager
+    /// 번역 자막 누적 엔진 (M2a). 수신 텍스트를 최근 줄로 표시.
+    var subtitles: SubtitleEngine
+    /// 원문 동시 표시 토글 등 환경설정 (M2a).
+    var settings: SettingsStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             header
             levelMeter
             footer
+            Divider().opacity(0.2)
+            subtitleArea
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(width: 220, height: 90, alignment: .topLeading)
+        .frame(width: 260, height: 140, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(.ultraThinMaterial)
@@ -83,6 +89,30 @@ struct MonitorHUD: View {
         if l > 0.85 { return .red }
         if l > 0.6 { return .orange }
         return .green
+    }
+
+    // 번역 자막 영역 (M2a 임시 표시 — 실제 오버레이는 M3).
+    // 번역문(최근 1줄) + 토글 시 원문 1줄. 비어 있으면 안내 placeholder.
+    private var subtitleArea: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            let translation = subtitles.displayTranslation
+            Text(translation.isEmpty ? "번역 대기 중…" : translation)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(translation.isEmpty ? Color.secondary : Color.primary)
+                .lineLimit(2)
+                .truncationMode(.head)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            let source = subtitles.displaySource
+            if settings.showSourceText, !source.isEmpty {
+                Text(source)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     // 하단: 입력 소스명 + VAD 모델 상태.
