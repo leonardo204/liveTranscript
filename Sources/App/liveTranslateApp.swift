@@ -17,121 +17,29 @@ struct liveTranslateApp: App {
     }
 }
 
-/// 메뉴바 드롭다운 내용.
-/// M1a: 캡처 시작/정지(실동작), 입력 소스 선택 서브메뉴, 레벨 미터, API 키 상태.
+/// 메뉴바 드롭다운 내용 (M3 간소화 — 피드백 #3).
+///
+/// VAD/오디오/레벨/입력소스 등 **상태 정보 항목을 제거**하고(제어 HUD로 대체),
+/// 최소한의 제어만 남긴다: 번역 시작/정지, 제어 HUD 표시 토글, 설정, 종료.
+/// (상세 입력 소스 선택은 설정 창에 있다.)
 private struct MenuBarContent: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        let audio = appState.audio
-
-        // 캡처 시작/정지 — 실제 오디오 캡처와 연동.
-        Button(audio.isCapturing ? "번역 정지" : "번역 시작") {
+        // 번역 시작/정지 — 제어 HUD 버튼과 동일 동작(메뉴에도 남겨 빠른 접근).
+        // 라벨은 세션 단일 진실(isRunning)을 따른다(hot-swap 실패로 인한 뒤집힘 방지).
+        Button(appState.isRunning ? "번역 정지" : "번역 시작") {
             appState.toggleCapture()
         }
 
-        // 입력 소스 선택 서브메뉴 (체크마크로 현재 선택 표시).
-        Menu("입력 소스") {
-            Button("장치 목록 새로고침") {
-                audio.refreshDevices()
-            }
-            Divider()
-
-            // 자동 선택(스펙 §5.2 기본값): BlackHole 우선 → 시스템 Tap → 기본 입력.
-            Button {
-                audio.selectAuto()
-            } label: {
-                let mark = audio.selection == .auto ? "✓ " : "   "
-                Text("\(mark)자동 (\(audio.activeSourceLabel))")
-            }
-
-            // 시스템 오디오 직접 캡처 (Core Audio Tap, 14.4+에서만 활성).
-            Button {
-                audio.selectSystemTap()
-            } label: {
-                let mark = audio.selection == .systemTap ? "✓ " : "   "
-                Text("\(mark)시스템 오디오 (직접 캡처)")
-            }
-            .disabled(!audio.systemTapAvailable)
-            .help(audio.systemTapAvailable
-                  ? "추가 설치 없이 시스템 소리를 직접 캡처합니다 (macOS 14.4+)"
-                  : "macOS 14.4 미만 — BlackHole 설치가 필요합니다")
-
-            Divider()
-
-            if audio.devices.isEmpty {
-                Text("입력 장치 없음")
-            } else {
-                ForEach(audio.devices) { device in
-                    Button {
-                        audio.selectDevice(device)
-                    } label: {
-                        let selected = audio.selection == .device(device.uid)
-                        let mark = selected ? "✓ " : "   "
-                        let tag = device.isLikelyLoopback ? " (루프백)" : ""
-                        Text("\(mark)\(device.name)\(tag)")
-                    }
-                }
-            }
-        }
-
         Divider()
 
-        // VAD(음성 감지) on/off 토글 (M1b, 기본 on). 음악·소음·무음 송신 차단으로 비용 절감.
-        Toggle("음성 감지(VAD)", isOn: Binding(
-            get: { audio.vadEnabled },
-            set: { audio.vadEnabled = $0 }
-        ))
-
-        // VAD 모델 상태 + 발화중 표시.
-        if audio.vadEnabled {
-            Text(audio.vadStatus.menuLabel)
-            if audio.isCapturing, audio.vadStatus == .ready {
-                Text(audio.isSpeaking ? "● 발화 감지됨" : "○ 무음/대기")
-            }
-        }
-
-        Divider()
-
-        // 레벨 미터 — 캡처 중일 때 입력 소리에 반응.
-        if audio.isCapturing {
-            Text("입력 레벨: \(LevelMeter.bar(for: audio.level))")
-            Text("선택: \(audio.activeSourceLabel)")
-        } else {
-            Text("캡처 정지됨")
-        }
-
-        // 권한 거부 등 오류는 클릭하면 해당 시스템 설정 창이 열리도록 한다(피드백 #3).
-        if let error = audio.lastErrorMessage {
-            Button("⚠️ \(error)") {
-                openSettingsForError()
-            }
-        }
-
-        Divider()
-
-        // Gemini 번역 상태 (M2a). 키 미포함 라벨만 표시.
-        Text("번역 상태: \(appState.geminiStatus)")
-
-        // 번역 자막 현재 줄(최근 1줄) — 메뉴에서도 흐름 확인.
-        if !appState.subtitles.displayTranslation.isEmpty {
-            Text("자막: \(appState.subtitles.displayTranslation)")
-        }
-
-        // 원문 동시 표시 토글 (FR-8, 기본 OFF).
-        Toggle("원문 동시 표시", isOn: Binding(
-            get: { appState.settings.showSourceText },
-            set: { appState.settings.showSourceText = $0 }
-        ))
-
-        Divider()
-
-        // 미니 HUD(플로팅 모니터) 표시 토글 (피드백 #1).
+        // 제어 HUD 표시/숨김 토글 (피드백 #1·#3 — 상태 정보는 제어 HUD에서 본다).
         Button {
             appState.toggleMonitor()
         } label: {
             let mark = appState.hud.isVisible ? "✓ " : "   "
-            Text("\(mark)모니터 표시")
+            Text("\(mark)제어 HUD 표시")
         }
 
         Button("설정…") {
@@ -140,30 +48,10 @@ private struct MenuBarContent: View {
 
         Divider()
 
-        // API 키 로드 여부 표시 (개발용 .env 또는 배포용 Keychain)
-        Text(appState.apiKeyLoaded ? "API 키: 로드됨" : "API 키: 없음")
-
-        Divider()
-
         Button("종료") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
-    }
-
-    /// 캡처 오류 항목 클릭 시: 마이크/시스템 오디오 권한 거부면 해당 설정 pane을 직접 연다.
-    /// 그 외 오류는 설정 창을 띄워 권한 섹션에서 상태를 확인하게 한다(피드백 #3).
-    private func openSettingsForError() {
-        let audio = appState.audio
-        if case .systemTap = audio.effectiveSelection {
-            PermissionHelper.openSystemAudioSettings()
-            return
-        }
-        if PermissionHelper.microphoneStatus().needsAction {
-            PermissionHelper.openMicrophoneSettings()
-        } else {
-            appState.openSettings()
-        }
     }
 }
 

@@ -20,16 +20,23 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         self.appState = appState
     }
 
-    /// 설정 창을 띄운다(없으면 생성). 앱을 활성화해 창을 앞으로 가져온다.
+    /// 설정 창을 띄운다(없으면 생성). 이미 떠 있고 다른 창에 가려져 있어도 항상 맨 앞으로 올린다.
     func show() {
+        let isNew = (window == nil)
         let window = window ?? makeWindow()
         self.window = window
 
         // accessory 앱 → 창을 앞으로 가져오려면 잠시 regular로.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+
+        // 최초 생성 시에만 중앙 배치(이미 떠 있던 창은 사용자가 옮긴 위치 유지).
+        if isNew { window.center() }
+
+        // 가려져 있어도 확실히 최상위로: makeKeyAndOrderFront + orderFrontRegardless.
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
-        window.center()
+        window.orderFrontRegardless()
     }
 
     private func makeWindow() -> NSWindow {

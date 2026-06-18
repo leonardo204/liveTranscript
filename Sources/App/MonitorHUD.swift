@@ -1,32 +1,38 @@
 import SwiftUI
 
-/// 미니 HUD(상시 플로팅 모니터)의 SwiftUI 내용 (M1.5 피드백 #1).
+/// 제어 HUD(상시 플로팅) SwiftUI 내용 (M3 — 기존 모니터 HUD 재구성).
 ///
-/// 메뉴를 열지 않아도 캡처 상태를 한눈에 볼 수 있도록 작은 패널에 실시간으로 그린다.
-/// 표시 항목: ① 캡처 상태 ② 입력 레벨 미터(부드러운 바) ③ VAD 발화 인디케이터
-/// ④ 현재 입력 소스명 ⑤ VAD 모델 상태.
+/// 피드백 #1: 번역문/원문 표시를 **제거**하고, 캡처 상태/입력 레벨/VAD/입력 소스/VAD 모델
+/// 상태만 보여주는 "제어 HUD"로 정리한다(번역문은 별도 자막 HUD로 분리).
+/// 피드백 #4: **시작/정지 토글 버튼**과 **설정 진입 버튼**을 추가한다.
 ///
-/// `AudioInputManager`의 `@Observable` 값(`level`/`isSpeaking`/`vadStatus`/`isCapturing`/
-/// `activeSourceLabel`)을 직접 구독해 갱신한다. 레벨은 값 바인딩만으로 부드럽게 반영하고,
-/// `animation`으로 바를 매끄럽게 보간한다(과한 재드로우 없이).
+/// 표시 항목: ① 캡처 상태 ② VAD 발화 인디케이터 ③ 입력 레벨 미터 ④ 입력 소스명/VAD 모델
+/// ⑤ 시작·정지 / 설정 컨트롤.
+///
+/// `AudioInputManager`의 `@Observable` 값을 구독하고, 컨트롤은 `AppState`의 액션을 호출한다.
 struct MonitorHUD: View {
-    var audio: AudioInputManager
-    /// 번역 자막 누적 엔진 (M2a). 수신 텍스트를 최근 줄로 표시.
-    var subtitles: SubtitleEngine
-    /// 원문 동시 표시 토글 등 환경설정 (M2a).
-    var settings: SettingsStore
+    /// 시작/정지·설정 액션을 위해 앱 상태를 직접 참조한다.
+    var appState: AppState
+
+    private var audio: AudioInputManager { appState.audio }
+
+    /// 비용 행 표시 여부(설정 토글, 태스크 C). off면 행 숨김 + HUD 높이 축소.
+    private var showCost: Bool { appState.settings.costHUDEnabled }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             header
             levelMeter
             footer
+            if showCost {
+                costRow
+            }
             Divider().opacity(0.2)
-            subtitleArea
+            controls
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(width: 260, height: 140, alignment: .topLeading)
+        .frame(width: 260, height: showCost ? 176 : 150, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(.ultraThinMaterial)
@@ -38,7 +44,7 @@ struct MonitorHUD: View {
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
-    // 상단: 캡처 상태 + VAD 발화 인디케이터.
+    // 상단: "제어 HUD" 타이틀 + 캡처 상태 + VAD 발화 인디케이터.
     private var header: some View {
         HStack(spacing: 6) {
             Circle()
@@ -91,31 +97,7 @@ struct MonitorHUD: View {
         return .green
     }
 
-    // 번역 자막 영역 (M2a 임시 표시 — 실제 오버레이는 M3).
-    // 번역문(최근 1줄) + 토글 시 원문 1줄. 비어 있으면 안내 placeholder.
-    private var subtitleArea: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            let translation = subtitles.displayTranslation
-            Text(translation.isEmpty ? "번역 대기 중…" : translation)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(translation.isEmpty ? Color.secondary : Color.primary)
-                .lineLimit(2)
-                .truncationMode(.head)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            let source = subtitles.displaySource
-            if settings.showSourceText, !source.isEmpty {
-                Text(source)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-    }
-
-    // 하단: 입력 소스명 + VAD 모델 상태.
+    // 하단: 입력 소스명 + VAD 모델 상태 + 번역 연결 상태.
     private var footer: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(audio.activeSourceLabel)
@@ -128,6 +110,65 @@ struct MonitorHUD: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            Text("번역: \(appState.geminiStatus)")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+
+    // 세션 비용 행(태스크 C, 스펙 §9.4): 전송/수신/총 $ (USD). 작은 값이라 소수 4자리.
+    private var costRow: some View {
+        let cost = appState.cost
+        return HStack(spacing: 6) {
+            Image(systemName: "dollarsign.circle")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+            Text("전송 \(usd(cost.sessionInputUSD))")
+            Text("수신 \(usd(cost.sessionOutputUSD))")
+            Text("총 \(usd(cost.sessionTotalUSD))")
+                .fontWeight(.semibold)
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+    }
+
+    /// USD 금액을 작은 값에 맞춰 $0.0000 형식으로 포맷한다(소수 4자리).
+    private func usd(_ value: Double) -> String {
+        String(format: "$%.4f", value)
+    }
+
+    // 컨트롤: 시작/정지 토글 + 설정 진입 (피드백 #4).
+    private var controls: some View {
+        HStack(spacing: 8) {
+            Button {
+                appState.toggleCapture()
+            } label: {
+                HStack(spacing: 4) {
+                    // 버튼 상태는 세션 단일 진실(`isRunning`)을 따른다 — 입력 소스 hot-swap
+                    // 재시작 실패로 audio.isCapturing이 일시적으로 false가 돼도 "정지"가
+                    // "시작"으로 뒤집히지 않는다(상태 불일치/오작동 방지).
+                    Image(systemName: appState.isRunning ? "stop.fill" : "play.fill")
+                        .font(.system(size: 9))
+                    Text(appState.isRunning ? "정지" : "시작")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(appState.isRunning ? .red : .accentColor)
+
+            Button {
+                appState.openSettings()
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.bordered)
+            .help("설정 열기")
         }
     }
 }
