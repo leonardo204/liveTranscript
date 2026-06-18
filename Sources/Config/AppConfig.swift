@@ -22,4 +22,21 @@ enum AppConfig {
 
     /// 개발용 .env 경로를 강제 지정하는 환경변수 이름.
     static let envPathOverrideKey = "LIVETRANSLATE_ENV_PATH"
+
+    // MARK: - 자막 길이 (태스크 B)
+
+    /// 누적 중인 번역 줄이 이 글자수를 넘으면 확정하고 다음으로 넘긴다(영화 자막 ~2줄).
+    /// 한국어 자막 1줄 ≈ 화면 폭 기준 ~25자 → 2줄 ≈ 50자 전후. 튜닝 가능.
+    static let defaultMaxCharsBeforeBreak: Int = 50
+
+    // MARK: - 비용 단가 (스펙 §9.1, 태스크 C)
+
+    /// 오디오 입력 단가: $3.50 / 1M 토큰.
+    static let costInputUSDPerMillionTokens: Double = 3.50
+
+    /// 오디오 출력 단가: $21.00 / 1M 토큰 (비용의 ~85%).
+    static let costOutputUSDPerMillionTokens: Double = 21.00
+
+    /// 오디오 토큰 환산율: 25 tokens/초(입력 누적 시간 → 토큰 추정).
+    static let costAudioTokensPerSecond: Double = 25.0
 }

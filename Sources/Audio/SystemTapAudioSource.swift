@@ -63,6 +63,9 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
 
     private var isRunning = false
 
+    /// teardown 완료 여부(중복 teardown 조기 반환용). start()에서 새 세션 시작 시 false로 리셋.
+    private var tornDown = false
+
     init() {
         self.name = "시스템 오디오 (직접 캡처)"
     }
@@ -78,6 +81,7 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
             throw AudioSourceError.systemTapUnavailable
         }
         guard !isRunning else { return }
+        tornDown = false   // 새 세션 시작 — 다음 teardown은 정상 수행되어야 한다.
 
         do {
             try setupTap()
@@ -225,35 +229,60 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
 
     /// 생성된 자원만 역순(Start→IOProc→Aggregate→Tap)으로 해제한다.
     /// 정상 stop / start 도중 실패 / deinit 모두 이 경로를 공유한다.
+    ///
+    /// 견고화(버그 수정): 입력 소스 hot-swap 시 stop()→teardown() 후 deinit에서 또
+    /// teardown()이 불릴 수 있다. 이미 해제/0으로 만든 핸들을 다시 파괴하면
+    /// `-10877`(kAudioHardwareBadObjectError) / "no object with given ID" /
+    /// "ObjectHasProperty: no object" 로그가 쏟아진다. 아래 가드로:
+    /// - 각 단계는 핸들이 유효할 때만 호출하고, 호출 직후 즉시 0/nil로 만들어
+    ///   재진입(중복 teardown)이 무해하도록 한다(멱등).
+    /// - `tornDown` 플래그로 완전 정리 후 재호출을 조기 반환한다.
+    /// - `-10877`은 "이미 사라진 객체" 신호로 보고 debug 수준으로만 남겨 무해화한다.
     private func teardown() {
-        // 1) IO 정지 (IOProc이 있을 때만).
-        if aggregateID != AudioObjectID(kAudioObjectUnknown), let procID = ioProcID {
-            let status = AudioDeviceStop(aggregateID, procID)
-            if status != noErr { logger.error("AudioDeviceStop failed: \(status)") }
+        // 이미 완전히 정리됐고 새로 생성된 핸들이 없으면 조기 반환(중복 teardown 무해).
+        if tornDown
+            && aggregateID == AudioObjectID(kAudioObjectUnknown)
+            && tapID == AudioObjectID(kAudioObjectUnknown)
+            && ioProcID == nil {
+            return
         }
-        // 2) IOProc 제거.
+
+        // 1) IO 정지 + 2) IOProc 제거 (aggregate와 procID가 모두 유효할 때만).
         if aggregateID != AudioObjectID(kAudioObjectUnknown), let procID = ioProcID {
-            let status = AudioDeviceDestroyIOProcID(aggregateID, procID)
-            if status != noErr { logger.error("AudioDeviceDestroyIOProcID failed: \(status)") }
+            logIfRealError("AudioDeviceStop", AudioDeviceStop(aggregateID, procID))
+            logIfRealError("AudioDeviceDestroyIOProcID", AudioDeviceDestroyIOProcID(aggregateID, procID))
         }
         ioProcID = nil
 
-        // 3) aggregate device 파괴.
+        // 3) aggregate device 파괴. 호출 직후 즉시 무효화 → 재진입 시 재파괴 안 함.
         if aggregateID != AudioObjectID(kAudioObjectUnknown) {
-            let status = AudioHardwareDestroyAggregateDevice(aggregateID)
-            if status != noErr { logger.error("AudioHardwareDestroyAggregateDevice failed: \(status)") }
+            let id = aggregateID
             aggregateID = AudioObjectID(kAudioObjectUnknown)
+            logIfRealError("AudioHardwareDestroyAggregateDevice", AudioHardwareDestroyAggregateDevice(id))
         }
         // 4) tap 파괴 (14.2+ 심볼이나 우리는 14.4+에서만 생성하므로 안전).
         if tapID != AudioObjectID(kAudioObjectUnknown) {
-            if #available(macOS 14.4, *) {
-                let status = AudioHardwareDestroyProcessTap(tapID)
-                if status != noErr { logger.error("AudioHardwareDestroyProcessTap failed: \(status)") }
-            }
+            let id = tapID
             tapID = AudioObjectID(kAudioObjectUnknown)
+            if #available(macOS 14.4, *) {
+                logIfRealError("AudioHardwareDestroyProcessTap", AudioHardwareDestroyProcessTap(id))
+            }
         }
 
         sink.reset()
+        tornDown = true
+    }
+
+    /// CoreAudio 상태를 평가해 "이미 사라진 객체"(-10877) 류는 debug로, 그 외 진짜
+    /// 실패만 error로 남긴다 — hot-swap/중복 teardown의 무해한 로그 폭주를 막는다.
+    private func logIfRealError(_ op: String, _ status: OSStatus) {
+        guard status != noErr else { return }
+        // kAudioHardwareBadObjectError(-10877): 대상 객체가 이미 없음 → 정리 목적상 무해.
+        if status == kAudioHardwareBadObjectError {
+            logger.debug("\(op): 대상 객체 없음(-10877, 무해)")
+        } else {
+            logger.error("\(op) failed: \(status)")
+        }
     }
 }
 

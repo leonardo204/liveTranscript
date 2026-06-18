@@ -24,7 +24,15 @@ final class AudioInputManager {
 
     /// 현재 입력 소스 선택. nil이면 자동 선택 규칙(§5.2)에 따른다(BlackHole 우선 → 시스템 Tap).
     /// `.device(uid)` 또는 `.systemTap` 으로 사용자가 수동 강제할 수 있다.
+    ///
+    /// 초기값 결정(태스크 A):
+    /// - SettingsStore에 사용자가 명시 선택한 값이 영속돼 있으면 **그 값 우선**.
+    /// - 미설정(최초 실행 등)이면 14.4+에서 `.systemTap`(시스템 오디오 직접 캡처) 기본,
+    ///   14.4 미만이면 `.auto`(BlackHole/마이크 폴백).
     private(set) var selection: InputSelection = .auto
+
+    /// 입력 소스 선택 영속화 저장소. 수동 선택 시 저장하고, 초기 1회 복원한다.
+    private let settings: SettingsStore?
 
     /// macOS 14.4+ 여부 — 시스템 오디오 직접 캡처(Core Audio Tap) 가용성.
     let systemTapAvailable: Bool = {
@@ -73,7 +81,8 @@ final class AudioInputManager {
 
     private var source: AudioSource?
 
-    init() {
+    init(settings: SettingsStore? = nil) {
+        self.settings = settings
         // 게이트 콜백은 actor/오디오 스레드에서 호출되므로 @Sendable + 스레드 안전 박스 경유.
         let forwardBox = self.forwardBox
         // self 캡처 회피를 위해 콜백에서 쓰는 핸들들을 지역 상수로 먼저 만든다.
@@ -100,8 +109,20 @@ final class AudioInputManager {
             Task { @MainActor [weak self] in self?.vadStatus = status }
         }
         refreshDevices()
+        applyInitialSelection()
         // 모델 로드(필요 시 HF 다운로드)는 1회. 실패해도 bypass로 graceful degrade.
         Task { await vadGate.prepare() }
+    }
+
+    /// 초기 입력 소스 선택을 결정한다(태스크 A).
+    /// 1) 사용자가 영속한 값이 있으면 그것 우선(기존 영속 로직 존중).
+    /// 2) 미설정이면 14.4+에서 `.systemTap` 기본, 미만이면 `.auto`(BlackHole/마이크 폴백).
+    private func applyInitialSelection() {
+        if let persisted = settings?.loadInputSelection() {
+            selection = persisted
+            return
+        }
+        selection = systemTapAvailable ? .systemTap : .auto
     }
 
     /// 발화 상태 변화를 메인 액터로 전달하는 싱크(콜백 → @Observable hop).
@@ -172,6 +193,7 @@ final class AudioInputManager {
     func selectDevice(_ device: AudioInputDevice) {
         selection = .device(device.uid)
         selectedDeviceUID = device.uid
+        settings?.saveInputSelection(selection)
         restartIfCapturing()
     }
 
@@ -182,20 +204,39 @@ final class AudioInputManager {
             return
         }
         selection = .systemTap
+        settings?.saveInputSelection(selection)
         restartIfCapturing()
     }
 
     /// 자동 선택으로 되돌린다(BlackHole 우선 → 시스템 Tap).
     func selectAuto() {
         selection = .auto
+        settings?.saveInputSelection(selection)
         restartIfCapturing()
     }
 
-    /// 캡처 중이면 현재 선택으로 재시작.
+    /// 캡처 중이면 현재 선택으로 재시작(입력 소스 hot-swap).
+    ///
+    /// 견고화(버그 수정): 이전에는 `try? start()`로 재시작 실패(-10877 등)를 삼켜
+    /// `isCapturing`이 조용히 false로 남고, 그 값을 분기 기준으로 쓰던 상위 토글이
+    /// 오작동했다. 이제 실패를 명시적으로 처리한다:
+    /// - 성공: `isCapturing == true`, `lastErrorMessage == nil`.
+    /// - 실패: `isCapturing == false`(좀비 상태 금지), `lastErrorMessage`에 안내 설정.
+    ///   onChunk 배선(forwardBox)은 stop()이 건드리지 않으므로 그대로 유지된다 →
+    ///   상위가 재시작 성공 시 즉시 청크가 다시 흐른다(번역 세션 배선 보존).
+    ///
+    /// 정지(`stop()`)와 시작(`start()`) 사이는 같은 MainActor 동기 구간이라
+    /// 이전 소스 teardown이 새 소스 start보다 먼저 완료된다.
     private func restartIfCapturing() {
         guard isCapturing else { return }
         stop()
-        try? start()
+        do {
+            try start()
+        } catch {
+            // start() 내부에서 lastErrorMessage가 이미 설정된다. isCapturing은 false 유지.
+            // 상위(AppState)는 isRunning(사용자 의도)을 단일 진실로 쓰므로, 여기서
+            // isCapturing이 false여도 "정지" 버튼이 "시작"으로 뒤집히지 않는다.
+        }
     }
 
     /// 캡처 시작. 권한을 먼저 요청한 뒤 엔진을 켠다.
