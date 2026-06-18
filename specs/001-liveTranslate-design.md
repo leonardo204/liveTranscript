@@ -227,7 +227,7 @@
 | **M2a** Gemini Live 연동 | GeminiLiveClient(WebSocket): setup/발화청크 Int16 송신/transcription 수신, 번역 텍스트 HUD 표시 | 음성 → 번역 텍스트 실시간 수신 |
 | **M2b** 비용 추정 | CostEstimator(송신시간+usageMetadata), HUD 세션비용 `전송/수신/총 $`, 설정 누적, on/off | 캡처 중 비용 실시간 증가 확인 |
 | **M2c** 무중단 재연결 | sessionResumption 핸들 + goAway 대응, 15분 선제 재연결 | 15분+ 연속 무중단 |
-| **M3** 오버레이 자막 | OverlayWindow + SubtitleEngine, 페이드 표시 | 화면 위 자막 실시간 표시 |
+| **M3** 자막 오버레이 + HUD 재구성 | **제어 HUD**(상태+시작/정지 버튼+설정, 번역문 제외) / **자막 HUD**(영화자막식 최상위 클릭통과 오버레이, 페이드) / 메뉴 간소화 / 자막 위치 설정(모니터·상하) | 최상위 자막 표시 + 제어 HUD 조작 |
 | **M4** 스타일 설정 | SettingsStore + 설정 UI + 실시간 미리보기 | 폰트/색/글로우 변경 즉시 반영 |
 | **M5** 견고화 | 15분 재연결, VAD, 에러/재시도, 온보딩 | 30분+ 연속 무중단, 키 Keychain |
 | **M6** 배포 | 코드사인/공증, 아이콘, 메뉴바 앱화 | 서명된 .app 정상 실행 |
