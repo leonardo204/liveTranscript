@@ -239,16 +239,34 @@ struct SettingsView: View {
     private var vadSection: some View {
         let audio = appState.audio
         return Section("음성 감지(VAD)") {
-            Toggle("음성 감지 사용", isOn: Binding(
-                get: { audio.vadEnabled },
-                set: {
-                    audio.vadEnabled = $0
-                    // VAD on/off는 setup의 서버 VAD on/off 결정(realtimeInputConfig)을 바꾸므로,
-                    // 번역 중이면 재연결해 setup을 갱신해야 한다(안 그러면 double-VAD 재발).
+            // VAD 방식 선택: 클라이언트(Silero) ↔ 서버(Gemini 자동).
+            // - "client": audio.vadEnabled = true  → 발화 구간만 전송(서버 VAD off + activity 신호).
+            // - "server": audio.vadEnabled = false → 연속 전송(서버 자동 VAD가 발화 감지).
+            // 번역 중 방식을 바꾸면 setup(realtimeInputConfig)이 달라지므로 재연결해 갱신한다
+            // (안 그러면 double-VAD 재발 또는 누락).
+            Picker("VAD 방식", selection: Binding(
+                get: { audio.vadEnabled ? "client" : "server" },
+                set: { newValue in
+                    audio.vadEnabled = (newValue == "client")
                     appState.reloadTranslationSession()
                 }
-            ))
-            LabeledContent("모델 상태", value: audio.vadStatus.menuLabel)
+            )) {
+                Text("클라이언트(Silero)").tag("client")
+                Text("서버(Gemini 자동)").tag("server")
+            }
+            .pickerStyle(.segmented)
+
+            Text("클라이언트: 음악/무음을 걸러 비용 절감, 소음에 강함. 서버: 연속 전송으로 Gemini가 발화를 감지(무음도 과금). 초기 반복이 심하면 서버 방식을 시도해 보세요.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            // 모델 상태: 클라이언트 방식일 때만 Silero 로드 상태가 의미 있다.
+            // 서버 방식은 클라이언트 VAD를 사용하지 않으므로 별도 표기한다.
+            if audio.vadEnabled {
+                LabeledContent("모델 상태", value: audio.vadStatus.menuLabel)
+            } else {
+                LabeledContent("모델 상태", value: "서버 VAD 사용 중")
+            }
         }
     }
 

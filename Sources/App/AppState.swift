@@ -416,9 +416,16 @@ final class AppState {
         let client = GeminiLiveClient(
             apiKey: apiKey,
             targetLanguageCode: settings.targetLanguageCode,
-            // 클라이언트 VAD 모드: VAD 사용 시 서버 VAD를 끄고 수동 activity 신호로 발화 경계를
-            // 지정한다(double-VAD 제거). 연결 시점의 audio.vadEnabled를 고정 전달한다.
-            clientVADEnabled: audio.vadEnabled
+            // 항상 false로 고정: 서버 자동 VAD를 사용한다(realtimeInputConfig 생략 + activity 신호 미전송).
+            // 검증 결과 translate-preview 모델은 manual activity 경계를 turn 종료로 인정하지 않아
+            // turnComplete를 보내지 않았고, idle 타이머와 강제 분절이 sparse VAD 프레임과 충돌해
+            // activityStart/End가 폭주(storm)했다. 따라서 activity 기반 경계 제어를 비활성화하고
+            // 서버 VAD에 일임한다. 클라이언트 Silero(audio.vadEnabled)는 "어떤 오디오를 보낼지"만
+            // 게이트(비용/소음 절감)하며 서버 VAD와 독립적으로 동작한다.
+            clientVADEnabled: false,
+            // 원문 동시 표시가 켜진 경우에만 입력 전사를 요청한다(off면 공식 translate 예제와 동일하게
+            // inputAudioTranscription 키를 생략 → 원문 자막 없음, 의도된 동작).
+            requestInputTranscription: settings.showSourceText
         )
         self.gemini = client
         translating = true
@@ -486,6 +493,13 @@ final class AppState {
             subtitles.ingestSourceDelta(delta)
         case .turnComplete:
             subtitles.ingestTurnComplete()
+        case .generationComplete:
+            // generation(재번역 단위) 경계: 자막은 다음 delta에서 직전 generation을 리셋하도록 표시한다.
+            // 오디오는 직전 generation의 아직 재생 안 된 큐를 비워(flush), 다음 generation이 같은
+            // 구간을 다시 말할 때 중첩 반복되는 것을 완화한다(flush는 큐만 비우고 재생은 지속).
+            log.info("event.generationComplete → 자막 generation 경계 + 오디오 flush")
+            subtitles.ingestGenerationComplete()
+            translatedAudioPlayer.flush()
         case .sentAudio(let sampleCount):
             cost.addSentAudio(sampleCount: sampleCount)   // 입력 비용 누적(태스크 C).
         case .outputTokens(let tokens):

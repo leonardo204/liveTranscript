@@ -107,6 +107,17 @@ final class SubtitleEngine {
     /// 무음 fallback 타이머(silenceTimeout). delta마다 재설정, turnComplete/확정 시 취소.
     @ObservationIgnored private var silenceTask: Task<Void, Never>?
 
+    /// generation(재번역 단위) 경계 리셋 대기 플래그.
+    ///
+    /// translate 모델은 한 turn 안에서 같은 구절을 여러 generation으로 반복 재번역(revise)한다.
+    /// 각 generation은 "현재까지 최선의 번역"을 처음부터 다시 내보내므로, generation 경계
+    /// (generationComplete/turnComplete) 이후 **처음 도착하는 delta는 새 generation의 시작**이다.
+    /// 그 첫 delta에서 직전 generation의 누적(current)을 비워, 재번역이 위에 누적되지 않고
+    /// 새로 자라며 대체되게 한다(무한 append/반복 차단). 경계 신호 수신 시 즉시 비우지 않고
+    /// **다음 delta가 올 때 비우는** 이유: 경계 직후에도 화면에 직전 generation을 유지해
+    /// 깜빡임을 줄이기 위함이다.
+    @ObservationIgnored private var pendingGenerationReset = false
+
     // MARK: - 수신 처리
 
     /// 번역 delta 조각 수신 → 현재 줄에 이어붙여 누적하고 즉시 표시한다.
@@ -114,6 +125,7 @@ final class SubtitleEngine {
     func ingestTranslationDelta(_ delta: String) {
         // 진단: delta 원문(앞 40자)과 길이 — 증분/누적/반복 전송 여부 판별용(자막 텍스트, 키 아님).
         log.debug("번역 delta: \"\(delta.prefix(40), privacy: .public)\" len=\(delta.count)")
+        applyPendingGenerationResetIfNeeded()
         guard appendIfMeaningful(delta, to: &currentTranslation) else { return }
         showAndCancelHide()
         // 길이 기반 break(태스크 B): ~2줄 분량 초과 시 현재까지를 확정하고 다음으로 넘긴다.
@@ -134,13 +146,45 @@ final class SubtitleEngine {
     func ingestSourceDelta(_ delta: String) {
         // 진단: 피드백 루프(번역 오디오 재캡처) 여부 확인용 — 원문 delta가 한국어 번역과 같으면 피드백 신호.
         log.debug("원문 delta: \"\(delta.prefix(40), privacy: .public)\" len=\(delta.count)")
+        applyPendingGenerationResetIfNeeded()
         _ = appendIfMeaningful(delta, to: &currentSource)
+    }
+
+    /// generation(재번역 단위) 경계 신호 수신 — 다음 delta에서 직전 generation을 리셋하도록 표시한다.
+    ///
+    /// 화면은 **현재 줄을 그대로 유지**하고(다음 generation 첫 delta가 와서 대체할 때까지),
+    /// 페이드/확정을 걸지 않는다(turn은 계속 진행 중일 수 있음). 무음 fallback 타이머만 취소해,
+    /// 경계 직후 무음으로 잘못 확정되는 것을 막는다. 실제 버퍼 비움은
+    /// `applyPendingGenerationResetIfNeeded()`가 다음 delta 진입 시 수행한다.
+    func ingestGenerationComplete() {
+        pendingGenerationReset = true
+        silenceTask?.cancel(); silenceTask = nil
+        log.debug("generation 경계 — 다음 delta에서 버퍼 리셋")
+    }
+
+    /// generation 리셋이 대기 중이면(직전 generation/turn 종료 후 첫 delta), 직전 generation의
+    /// 누적(current)을 confirmed로 옮겨 표시를 유지한 채 current를 비운다.
+    ///
+    /// 이렇게 하면 새 generation의 재번역이 직전 generation 위에 누적되지 않고 빈 버퍼에서
+    /// 처음부터 자라며 대체된다. displayTranslation은 current 우선이라 새 generation을 보여주고,
+    /// current가 빈 짧은 순간에도 confirmed가 직전 줄을 보여줘 깜빡임을 줄인다.
+    private func applyPendingGenerationResetIfNeeded() {
+        guard pendingGenerationReset else { return }
+        if !currentTranslation.isEmpty { confirmedTranslation = currentTranslation }
+        if !currentSource.isEmpty { confirmedSource = currentSource }
+        currentTranslation = ""
+        currentSource = ""
+        pendingGenerationReset = false
+        log.debug("generation 리셋 적용: 직전 generation을 confirmed로 이동, current 비움")
     }
 
     /// 턴(발화) 종료 — 누적된 현재 줄을 확정 줄로 고정하고 유지 시간 후 페이드아웃한다.
     /// 이후 버퍼를 비워 다음 문장이 처음부터 새로 시작하게 한다.
     func ingestTurnComplete() {
         confirmTurn(reason: .turnComplete)
+        // turn 종료 후 도착하는 첫 delta는 새 turn(새 generation)의 시작이므로, 다음 delta에서
+        // 버퍼를 비워 새로 누적되게 한다(이전 turn 잔재가 다음 turn에 append되지 않도록).
+        pendingGenerationReset = true
     }
 
     /// 세션 정지/재시작 시 누적 텍스트를 비우고 즉시 숨긴다.
@@ -153,6 +197,7 @@ final class SubtitleEngine {
         currentSource = ""
         confirmedTranslation = ""
         confirmedSource = ""
+        pendingGenerationReset = false   // generation 경계 상태도 초기화(다음 세션은 깨끗하게 시작)
         isVisible = false
     }
 

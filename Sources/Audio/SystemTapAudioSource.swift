@@ -110,8 +110,13 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
     /// 1~2단계: 전체 시스템 mono tap 생성(unmuted = 소리 그대로 들림).
     @available(macOS 14.4, *)
     private func setupTap() throws {
-        // 전체 출력 캡처: 제외 프로세스 없음. NS_REFINED_FOR_SWIFT → Swift 이니셜라이저로 노출.
-        let tapDesc = CATapDescription(monoGlobalTapButExcludeProcesses: [])
+        // 피드백 루프 방지(핵심): 우리 앱 자신의 프로세스를 탭에서 **제외**한다.
+        // 번역 오디오 재생을 켜면 우리 앱이 출력하는 번역 음성이 전체 시스템 탭에 다시
+        // 잡혀 입력으로 되돌아가고(loopback), 모델이 자기 출력을 재번역해 같은 구절이
+        // 무한 반복된다. 자기 프로세스를 제외하면 원본 콘텐츠 소리만 캡처되고 번역 출력은
+        // 잡히지 않아 피드백이 끊긴다. (제외 ID 조회 실패 시 빈 목록으로 폴백 — 기존 동작.)
+        let excluded = Self.currentProcessAudioObjectID().map { [$0] } ?? []
+        let tapDesc = CATapDescription(monoGlobalTapButExcludeProcesses: excluded)
         tapDesc.name = "liveTranslate System Tap"
         tapDesc.isPrivate = true            // 이 클라이언트만 보이는 tap
         tapDesc.muteBehavior = .unmuted     // 캡처만, 시스템 소리는 정상 재생
@@ -126,6 +131,29 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
         }
         tapID = newTapID
         tapUUIDString = tapDesc.uuid.uuidString
+    }
+
+    /// 우리 앱 자신의 Core Audio 프로세스 객체 ID를 조회한다(탭 제외 목록용).
+    /// PID → AudioObjectID 변환(kAudioHardwarePropertyTranslatePIDToProcessObject). 실패 시 nil.
+    private static func currentProcessAudioObjectID() -> AudioObjectID? {
+        var pid = ProcessInfo.processInfo.processIdentifier
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var objectID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            UInt32(MemoryLayout<pid_t>.size),
+            &pid,
+            &size,
+            &objectID
+        )
+        guard status == noErr, objectID != AudioObjectID(kAudioObjectUnknown) else { return nil }
+        return objectID
     }
 
     /// tap의 UUID 문자열(aggregate sub-tap 구성에 사용).

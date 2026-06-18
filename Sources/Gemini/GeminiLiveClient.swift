@@ -46,6 +46,12 @@ actor GeminiLiveClient {
         /// 턴(발화) 종료 신호(`serverContent.turnComplete: true`).
         /// 소비자는 현재 누적 버퍼를 확정 줄로 고정하고 표시 시간 후 페이드아웃한다.
         case turnComplete
+        /// generation(재번역 단위) 종료 신호(`serverContent.generationComplete: true`).
+        /// translate 모델은 한 turn 내에서 여러 generation으로 같은 구절을 반복 재번역(revise)한다.
+        /// 각 generation은 "현재까지 최선의 번역"을 처음부터 다시 내보내므로, 소비자는 이 경계에서
+        /// **다음 delta가 오면 직전 generation 버퍼를 리셋(대체)** 해야 무한 누적/반복을 막을 수 있다.
+        /// 모델마다 유무가 다른 보조 신호이며, 종료 1차 신호는 turnComplete다.
+        case generationComplete
         /// 송신한 오디오 청크의 샘플 수(비용 입력 추정용, 태스크 C). 16kHz mono 기준.
         case sentAudio(sampleCount: Int)
         /// usageMetadata가 보고한 출력 오디오 토큰 수(비용 출력 추정용, 태스크 C).
@@ -75,6 +81,12 @@ actor GeminiLiveClient {
     /// - false: 기존 동작 — 서버 VAD on(realtimeInputConfig 생략), activity 신호 없이 연속 전송.
     /// AppState가 연결 시점의 `settings.vadEnabled`(audio.vadEnabled)를 전달한다.
     private let clientVADEnabled: Bool
+
+    /// 입력 오디오 전사(원문) 요청 여부.
+    /// - true: setup에 `inputAudioTranscription:{}`를 포함 → 서버가 inputTranscription(원문) delta를 보낸다.
+    /// - false: 해당 키를 **생략**(공식 translate 예제와 동일) → 원문 전사가 오지 않는다.
+    /// "원문 동시 표시"(settings.showSourceText)가 켜진 경우에만 true로 전달된다(기본 off → 미요청).
+    private let requestInputTranscription: Bool
 
     /// 재연결 백오프(초). 끊길 때마다 증가, setupComplete 수신 시 리셋.
     private var reconnectDelay: TimeInterval = 1.0
@@ -190,6 +202,16 @@ actor GeminiLiveClient {
     /// 무음 판정 임계(초). end-of-speech 권장(≥0.5s)을 충족하도록 0.6s.
     private let segmentIdleSeconds: TimeInterval = 0.6
 
+    /// 강제 turn 경계 임계(초). 연속 발화(영상 등 무음 없는 입력)는 segmentIdleSeconds로
+    /// 절대 끝나지 않으므로, 한 발화 세그먼트가 이 시간 이상 이어지면 강제로 activityEnd를
+    /// 보내 turn을 끊는다. 자연 문장 경계가 아니라 무한 재번역 방지용 안전장치다 — 문장이
+    /// 6초보다 길면 중간에 끊길 수 있으나, 같은 윈도우의 무한 반복보다는 낫다(실험값).
+    private let maxActivitySegmentSeconds: TimeInterval = 6.0
+
+    /// 현재 발화 세그먼트가 시작된 시각(activityStart 전송 시점). 강제 분절 경과 시간 측정용.
+    /// 세그먼트가 비활성이면 nil. (앱 런타임 코드이므로 Date() 사용 가능.)
+    private var segmentStartedAt: Date?
+
     // MARK: - 초기화
 
     /// - Parameters:
@@ -199,11 +221,13 @@ actor GeminiLiveClient {
     init(apiKey: String,
          model: String = AppConfig.geminiModel,
          targetLanguageCode: String = AppConfig.defaultTargetLanguageCode,
-         clientVADEnabled: Bool = false) {
+         clientVADEnabled: Bool = false,
+         requestInputTranscription: Bool = false) {
         self.apiKey = apiKey
         self.model = model
         self.targetLanguageCode = targetLanguageCode
         self.clientVADEnabled = clientVADEnabled
+        self.requestInputTranscription = requestInputTranscription
     }
 
     // MARK: - 연결 수명
@@ -245,11 +269,22 @@ actor GeminiLiveClient {
             }
             return
         }
+        // 클라이언트 VAD 모드: 연속 발화(무음 없는 입력)는 idle 타이머로 세그먼트가 끝나지
+        // 않으므로, 진행 중 세그먼트가 maxActivitySegmentSeconds를 넘으면 강제로 turn을 끊는다.
+        // (서버가 연속 오디오에서 generationComplete/turnComplete를 안 줘서 생기는 무한 재번역을
+        //  클라이언트가 강제로 끊는 시도다.) endActivitySegment가 activityEnd를 보내고 세그먼트를
+        //  비활성화하면, 바로 아래 activityStart 체크가 곧이어 새 세그먼트를 시작한다.
+        if clientVADEnabled, activitySegmentActive, let started = segmentStartedAt,
+           Date().timeIntervalSince(started) >= maxActivitySegmentSeconds {
+            endActivitySegment()   // activityEnd 전송 + activitySegmentActive=false + segmentStartedAt=nil
+            log.info("연속 발화 \(self.maxActivitySegmentSeconds, privacy: .public)s 초과 → 강제 turn 경계(activityEnd)")
+        }
         // 클라이언트 VAD 모드: 세그먼트가 비활성이면 오디오 전송 직전에 activityStart를 보낸다.
         // 같은 actor 메서드 안에서 순차 전송하므로 activityStart → audio 순서가 자연 보장된다.
         if clientVADEnabled, !activitySegmentActive {
             sendActivityStart()
             activitySegmentActive = true
+            segmentStartedAt = Date()   // 강제 분절 경과 측정 기준점
             log.debug("activityStart 전송(발화 세그먼트 시작)")
         }
         // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): state==ready라 송신.
@@ -293,6 +328,7 @@ actor GeminiLiveClient {
     private func endActivitySegment() {
         guard clientVADEnabled, activitySegmentActive, state == .ready, task != nil else { return }
         activitySegmentActive = false
+        segmentStartedAt = nil   // 세그먼트 종료 — 경과 측정 기준점 정리
         sendActivityEnd()
         segmentIdleTask = nil
         log.debug("activityEnd 전송(무음 \(self.segmentIdleSeconds, privacy: .public)s)")
@@ -324,6 +360,7 @@ actor GeminiLiveClient {
     /// 새 소켓에서는 세그먼트를 처음부터 시작하므로, 이전 세그먼트 잔재를 남기지 않는다.
     private func resetActivitySegment() {
         activitySegmentActive = false
+        segmentStartedAt = nil   // 재연결/정지 시 세그먼트 경과 기준점도 초기화
         segmentIdleTask?.cancel()
         segmentIdleTask = nil
     }
@@ -512,8 +549,16 @@ actor GeminiLiveClient {
                 log.info("interrupted 수신")
                 emit(.interrupted)
             }
+            // generation(재번역 단위) 종료: turnComplete보다 먼저 처리해, 같은 메시지에 둘 다
+            // 실릴 경우에도 소비자가 generation 경계를 turn 확정 전에 인지하도록 한다.
+            // translate 모델의 revise 반복을 generation 경계로 끊기 위한 보조 신호.
+            if content.generationComplete == true {
+                log.info("generationComplete 수신")
+                emit(.generationComplete)
+            }
             // 턴 종료는 별도 .turnComplete 이벤트로 명시 전달 — 빈 문자열 emit 같은 혼란을 없앤다.
             if content.turnComplete == true {
+                log.info("turnComplete 수신")
                 emit(.turnComplete)
             }
         }
@@ -699,23 +744,31 @@ actor GeminiLiveClient {
         return SetupMessage(setup: .init(
             model: model,
             generationConfig: generationConfig,
-            inputAudioTranscription: .init(),
+            // 입력 전사(원문)는 "원문 동시 표시"가 켜진 경우에만 요청한다.
+            // requestInputTranscription=false면 nil → JSON에서 키 생략 → 공식 translate 예제와 동일.
+            // (이 경우 inputTranscription delta가 오지 않으므로 원문 자막은 표시되지 않는다 — 의도된 동작.)
+            inputAudioTranscription: requestInputTranscription ? EmptyConfig() : nil,
+            // 출력 전사는 자막 번역용으로 항상 `{}` 요청.
             outputAudioTranscription: .init(),
             // 기본은 top-level translationConfig.
             translationConfig: useNestedTranslationConfig ? nil : translationConfig(),
             // 세션 재개(M2c): 보관된 핸들이 있으면 그 시점부터, 없으면 `{}`로 새 세션 재개 활성화.
             sessionResumption: SessionResumptionConfig(handle: resumptionHandle),
-            // 클라이언트 VAD 모드일 때만 서버 자동 VAD를 끈다(double-VAD 제거).
+            // realtimeInputConfig를 **항상 명시 전송**해 공식 translate 예제와 일치시킨다.
+            // clientVADEnabled=false(기본)면 disabled:false(서버 자동 VAD ON 명시),
+            // clientVADEnabled=true면 disabled:true(서버 VAD OFF, 클라이언트 수동 경계).
             // top-level 위치(model/generationConfig 형제) — translationConfig nested 규칙과 무관.
-            // clientVADEnabled=false면 nil → 필드 생략 → 서버 VAD 기본 ON 유지(기존 동작).
             realtimeInputConfig: clientVADEnabled
-                ? RealtimeInputConfig(automaticActivityDetection: .init(disabled: true))
-                : nil
+                ? RealtimeInputConfig(disabled: true)
+                : RealtimeInputConfig(disabled: false)
         ))
     }
 
     private func translationConfig() -> TranslationConfig {
-        TranslationConfig(targetLanguageCode: targetLanguageCode, echoTargetLanguage: false)
+        // echoTargetLanguage=true: 공식 translate 예제(gemini-live-translate-livekit)의 기본값과 일치.
+        // 입력이 이미 목표 언어면 그대로 따라 말한다(예제 동작). 이전엔 false였으나, 공식 예제와
+        // setup을 일치시켜 서버가 turnComplete를 보내도록 유도하기 위해 true로 변경한다.
+        TranslationConfig(targetLanguageCode: targetLanguageCode, echoTargetLanguage: true)
     }
 
     // MARK: - URL / 마스킹
@@ -827,7 +880,9 @@ private struct SetupMessage: Encodable {
     struct Setup: Encodable {
         let model: String
         let generationConfig: GenerationConfig
-        let inputAudioTranscription: EmptyConfig
+        /// 입력 전사(원문) 요청. nil이면 JSON에서 키가 생략되어 공식 translate 예제와 동일해진다
+        /// (서버가 inputTranscription을 보내지 않음). "원문 동시 표시"가 켜진 경우에만 `{}`로 채운다.
+        let inputAudioTranscription: EmptyConfig?
         let outputAudioTranscription: EmptyConfig
         /// top-level translationConfig(기본). 폴백 시 nil.
         let translationConfig: TranslationConfig?
@@ -845,6 +900,12 @@ private struct SetupMessage: Encodable {
 private struct RealtimeInputConfig: Encodable {
     struct AutomaticActivityDetection: Encodable { let disabled: Bool }
     let automaticActivityDetection: AutomaticActivityDetection
+
+    /// 편의 init. `disabled:false`면 서버 자동 VAD ON(공식 예제와 동일하게 명시 전송),
+    /// `disabled:true`면 서버 VAD OFF(클라이언트 VAD 수동 경계). 항상 명시 전송한다.
+    init(disabled: Bool) {
+        self.automaticActivityDetection = .init(disabled: disabled)
+    }
 }
 
 /// realtimeInput.activityStart / activityEnd 제어 메시지(클라이언트 VAD 수동 신호).
@@ -910,6 +971,9 @@ private struct ServerContent: Decodable {
     let outputTranscription: Transcription?
     let modelTurn: ModelTurn?
     let turnComplete: Bool?
+    /// generation(재번역 단위) 종료 신호. translate 모델이 한 turn 안에서 여러 번
+    /// 재번역할 때 각 generation 종료마다 true로 온다(모델별 유무 차이 있음 — 보조 신호).
+    let generationComplete: Bool?
     let interrupted: Bool?
 }
 

@@ -29,12 +29,18 @@ final class TranslatedAudioPlayer {
     /// 백프레셔 드롭 로그 스로틀 카운터(고빈도). 첫 1회 + 50회마다 1회만 로그.
     private var dropLogCount = 0
 
-    /// 직전에 재생 큐에 넣은 청크(바이트). 모델이 동일 PCM을 연속 전송하면 같은 오디오가
-    /// 반복 재생되므로, 직전과 **바이트가 완전히 동일한** 청크만 보수적으로 skip한다.
-    /// 한계: 모델 중복이 byte-identical일 때만 효과가 있다. 같은 문장이라도 합성 결과가
-    /// 미세하게 다르면(byte가 달라지면) 통과되어 반복이 들릴 수 있다 — 클라이언트에서
-    /// 모델 중복 생성 자체를 완전히 차단하는 것은 불가능하다.
-    private var lastEnqueuedData: Data?
+    /// 최근 재생 큐에 넣은 청크들의 슬라이딩 윈도우(FIFO). 모델이 초기 ~1분간 같은 문장을
+    /// 재번역하면서 동일 PCM을 **비연속으로**(다른 청크가 사이에 끼었다 다시) 반복 전송해
+    /// 같은 오디오가 반복 재생되므로, 직전 1개만 보던 기존 비교를 최근 윈도우 전체 비교로
+    /// 강화한다. (hash, Data) 쌍을 들고 hash 일치 시 Data 동등성까지 확인해 해시 충돌을
+    /// 방어한다. 윈도우 내 **바이트 완전 일치**만 skip(보수적) — 자연 발화는 매번 PCM이
+    /// 달라 영향이 적다. 한계: 모델 중복 생성 자체는 서버 동작이라 클라이언트에서 차단 불가하며
+    /// 반복 "재생"만 완화한다.
+    private var recentChunks: [(hash: Int, data: Data)] = []
+    /// hash 빠른 조회용 멀티셋 카운트(같은 hash가 윈도우에 여러 개일 수 있어 카운트로 관리).
+    private var recentHashCounts: [Int: Int] = [:]
+    /// 윈도우 최대 청크 수(약 40개 ≈ 수 초 분량 — 과도하지 않게).
+    private let recentChunkWindow = 40
     /// 중복 오디오 skip 로그 스로틀 카운터(고빈도). 첫 1회 + 50회마다 1회만 로그.
     private var dupSkipLogCount = 0
 
@@ -146,7 +152,7 @@ final class TranslatedAudioPlayer {
             try engine.start()
             player.play()
             running = true
-            lastEnqueuedData = nil   // 새 세션 — 직전 청크 비교 상태 초기화
+            resetDedupWindow()   // 새 세션 — 중복 청크 윈도우 초기화
             log.info("번역 오디오 재생 시작: SR=\(self.format.sampleRate, privacy: .public)Hz ch=\(self.format.channelCount, privacy: .public) 출력=\(self.outputDeviceUID ?? "(시스템 기본)", privacy: .public)")
         } catch {
             running = false
@@ -160,7 +166,7 @@ final class TranslatedAudioPlayer {
         engine.stop()
         running = false
         inFlight.reset()   // 잔여 버퍼 폐기와 동기 — 다음 재생 시작 시 카운터를 0에서 시작
-        lastEnqueuedData = nil   // 정지 — 직전 청크 비교 상태 초기화
+        resetDedupWindow()   // 정지 — 중복 청크 윈도우 초기화
         log.info("번역 오디오 재생 정지")
     }
 
@@ -172,7 +178,7 @@ final class TranslatedAudioPlayer {
         guard running else { return }
         player.stop()        // 스케줄된 버퍼 폐기(큐 클리어)
         inFlight.reset()
-        lastEnqueuedData = nil
+        resetDedupWindow()
         player.play()        // 큐만 비우고 재생은 지속(다음 enqueue를 즉시 받음)
         log.info("번역 오디오 flush(interrupted — 잔여 버퍼 폐기)")
     }
@@ -180,13 +186,16 @@ final class TranslatedAudioPlayer {
     /// 24kHz mono Int16 LE PCM Data를 재생 큐에 추가한다(재생 중일 때만).
     func enqueue(int16LE data: Data) {
         guard running, !data.isEmpty else { return }
-        // 수정3: 직전에 큐에 넣은 청크와 바이트가 완전히 동일하면 skip(보수적 — 모델이
-        // 동일 PCM을 연속 전송해 같은 오디오가 반복 재생되는 것을 완화). 바이트 완전 일치만
-        // 막으며, 다른 합성이면 통과한다(완전 차단 불가).
-        if let last = lastEnqueuedData, last == data {
+        // 수정4: 최근 청크 윈도우 안에 바이트가 완전히 동일한 청크가 있으면 skip(보수적 —
+        // 모델이 같은 PCM을 비연속으로 반복 전송해 같은 오디오가 반복 재생되는 것을 완화).
+        // hash로 빠르게 걸러낸 뒤 Data 동등성까지 확인해 해시 충돌을 방어한다. 바이트 완전
+        // 일치만 막으며 다른 합성이면 통과한다(모델 중복 생성 자체는 서버 동작이라 차단 불가).
+        let chunkHash = data.hashValue
+        if recentHashCounts[chunkHash] != nil,
+           recentChunks.contains(where: { $0.hash == chunkHash && $0.data == data }) {
             dupSkipLogCount += 1
             if dupSkipLogCount == 1 || dupSkipLogCount % 50 == 0 {
-                log.debug("중복 오디오 청크 skip: \(data.count, privacy: .public) bytes 누적skip=\(self.dupSkipLogCount, privacy: .public)")
+                log.debug("중복 오디오 청크 skip(윈도우): \(data.count, privacy: .public) bytes 누적skip=\(self.dupSkipLogCount, privacy: .public)")
             }
             return
         }
@@ -219,8 +228,27 @@ final class TranslatedAudioPlayer {
         if enqueueLogCount == 1 || enqueueLogCount % 50 == 0 {
             log.debug("enqueue: \(data.count, privacy: .public) bytes inFlight=\(self.inFlight.current(), privacy: .public)프레임")
         }
-        // 수정3: 정상 처리된 청크를 직전 청크로 기록(다음 동일 청크 skip 판정용).
-        lastEnqueuedData = data
+        // 수정4: 정상 처리된 청크를 윈도우에 기록(이후 동일 청크 skip 판정용).
+        recordChunk(hash: chunkHash, data: data)
         player.scheduleBuffer(buf, completionHandler: { [inFlight] in inFlight.sub(frameCount) })
+    }
+
+    /// 정상 처리된 청크를 슬라이딩 윈도우에 추가하고, 한도를 넘으면 가장 오래된 것을 제거한다.
+    private func recordChunk(hash: Int, data: Data) {
+        recentChunks.append((hash: hash, data: data))
+        recentHashCounts[hash, default: 0] += 1
+        while recentChunks.count > recentChunkWindow {
+            let removed = recentChunks.removeFirst()
+            if let count = recentHashCounts[removed.hash] {
+                if count <= 1 { recentHashCounts.removeValue(forKey: removed.hash) }
+                else { recentHashCounts[removed.hash] = count - 1 }
+            }
+        }
+    }
+
+    /// 중복 청크 윈도우를 비운다(start/stop/flush에서 호출).
+    private func resetDedupWindow() {
+        recentChunks.removeAll(keepingCapacity: true)
+        recentHashCounts.removeAll(keepingCapacity: true)
     }
 }
