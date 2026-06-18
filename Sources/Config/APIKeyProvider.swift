@@ -4,7 +4,7 @@ import Foundation
 ///
 /// 메모리/보안 정책상 키 출처를 빌드/환경에 따라 교체할 수 있어야 한다.
 /// - 개발: `DotEnvAPIKeyProvider` — 프로젝트 루트 `.env` 파싱.
-/// - 배포(M5+): `KeychainAPIKeyProvider`(미구현) — 사용자 입력 → Keychain 저장.
+/// - 배포(M5+): `KeychainAPIKeyProvider`(구현됨) — 사용자 입력 → Keychain 저장.
 ///   배포 시 `AppState`의 기본 provider만 교체하면 된다.
 protocol APIKeyProvider: Sendable {
     /// Gemini API 키. 없으면 nil.

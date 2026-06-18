@@ -9,7 +9,8 @@ import os
 /// - VAD 통과 발화 청크([Float], 16k mono)를 Int16 LE PCM → base64 → `realtimeInput`으로 송신.
 /// - 수신 메시지(`serverContent`)에서 `outputTranscription`(번역 자막)/`inputTranscription`(원문)을
 ///   추출해 `AsyncStream<GeminiEvent>`로 외부에 방출한다.
-/// - 연결 끊김 시 단순 백오프 재연결(무중단 핸드오버/sessionResumption은 M2c).
+/// - 연결 끊김 시 단순 백오프 재연결.
+/// - M2c 구현: goAway/sessionResumption 기반 무중단 재연결 + 15분 선제 핸드오버.
 ///
 /// 동시성: `actor`로 격리한다. 송신/수신 상태는 actor 내부에서만 변경된다.
 /// 오디오 스레드(`AudioInputManager.onChunk`)는 `nonisolated`한 `sendAudio(_:)`로 진입해
@@ -108,6 +109,16 @@ actor GeminiLiveClient {
     /// 매 수신마다 찍지 않고 N회마다 한 번만 debug 로그를 남긴다.
     private var resumptionUpdateCount = 0
 
+    /// 최신 세션 재개 핸들(M2c). sessionResumptionUpdate(resumable=true)에서 갱신하고,
+    /// 재연결 시 setup의 sessionResumption.handle로 넘겨 컨텍스트를 이어받는다. 키 아님(노출 무방하나 로그 자제).
+    private var resumptionHandle: String?
+
+    /// 선제 재연결 타이머(M2c). 세션 한도(오디오 약 15분) 도달 전에 핸들 기반으로 미리 재연결한다.
+    /// setupComplete마다 재무장한다.
+    private var proactiveReconnectTask: Task<Void, Never>?
+    /// 선제 재연결까지의 간격(초). 15분 한도보다 짧게 14분으로 잡아 여유를 둔다.
+    private let proactiveReconnectInterval: TimeInterval = 14 * 60
+
     // MARK: - 초기화
 
     /// - Parameters:
@@ -139,6 +150,8 @@ actor GeminiLiveClient {
     func stop() {
         stopped = true
         generation += 1   // 이전 task의 지연 콜백 무효화
+        proactiveReconnectTask?.cancel()   // 선제 재연결 타이머 정지(M2c)
+        proactiveReconnectTask = nil
         teardownSocket()
         state = .disconnected
         continuation?.finish()
@@ -211,6 +224,10 @@ actor GeminiLiveClient {
     }
 
     private func teardownSocket() {
+        // 선제 재연결 타이머를 취소(M2c) — 재연결/정지 모든 경로가 이곳을 통과하므로
+        // 진행 중 이전 타이머가 스테일하게 발화하지 않는다(다음 setupComplete에서 재무장).
+        proactiveReconnectTask?.cancel()
+        proactiveReconnectTask = nil
         receiveLoop?.cancel()
         receiveLoop = nil
         task?.cancel(with: .normalClosure, reason: nil)
@@ -287,6 +304,8 @@ actor GeminiLiveClient {
             connectAttempts = 0
             state = .ready
             emit(.info("Gemini 연결됨 (setup 완료)"))
+            // 세션 한도(약 15분) 도달 전 선제 핸드오버를 예약(M2c). setupComplete마다 재무장.
+            armProactiveReconnect()
             return
         }
 
@@ -312,16 +331,20 @@ actor GeminiLiveClient {
             emit(.outputTokens(outputTokens))
         }
 
-        // goAway / sessionResumptionUpdate: M2c(무중단 재연결)에서 처리 — 지금은 로그만.
-        if msg.goAway != nil {
-            log.info("goAway 수신 (M2c에서 처리 예정)")
-            emit(.info("세션 종료 예고 수신"))
+        // goAway: 서버가 곧 연결을 종료한다는 예고 → 저장된 핸들로 선제 재연결(무중단 핸드오버).
+        if let goAway = msg.goAway {
+            log.info("goAway 수신 — 선제 핸드오버 (timeLeft=\(goAway.timeLeft ?? "?", privacy: .public))")
+            emit(.info("세션 전환 중 (무중단 재연결)"))
+            Task { await reconnectWithHandle() }
         }
-        if msg.sessionResumptionUpdate != nil {
-            // 매우 자주 도착하므로 로그 폭주 방지: 50회마다 한 번만 debug 로그.
+        // sessionResumptionUpdate: 재개 가능 시점의 핸들을 보관(재연결 시 컨텍스트 유지에 사용).
+        if let update = msg.sessionResumptionUpdate {
+            if update.resumable == true, let handle = update.newHandle, !handle.isEmpty {
+                resumptionHandle = handle
+            }
             resumptionUpdateCount += 1
             if resumptionUpdateCount % 50 == 1 {
-                log.debug("sessionResumptionUpdate 수신 (누적 \(self.resumptionUpdateCount)회, M2c에서 처리 예정)")
+                log.debug("sessionResumptionUpdate 수신 (누적 \(self.resumptionUpdateCount)회, 핸들 보관됨)")
             }
         }
     }
@@ -404,6 +427,12 @@ actor GeminiLiveClient {
 
         if !transient {
             connectAttempts += 1
+            // 핸들로 재개 시도가 핸드셰이크 단계에서 실패하면 핸들이 만료/무효일 수 있으므로
+            // 폐기하고 다음 시도는 새 세션으로 진행한다(영구 실패 방지).
+            if resumptionHandle != nil {
+                log.info("재개 핸들로 연결 실패 → 핸들 폐기 후 새 세션 재시도")
+                resumptionHandle = nil
+            }
             if connectAttempts > maxConnectAttempts {
                 failPermanently("연결 실패 — API 키와 네트워크를 확인하세요 (\(maxConnectAttempts)회 연속 실패)")
                 return
@@ -422,6 +451,35 @@ actor GeminiLiveClient {
         openSocket()
     }
 
+    // MARK: - 선제 재연결(M2c)
+
+    /// 세션 한도(약 15분) 도달 전 선제적으로 핸들 기반 재연결을 예약한다(M2c).
+    /// setupComplete마다 재무장한다(이전 타이머는 취소).
+    private func armProactiveReconnect() {
+        proactiveReconnectTask?.cancel()
+        let interval = proactiveReconnectInterval
+        proactiveReconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.proactiveReconnect()
+        }
+    }
+
+    /// 선제 재연결 실행: ready 상태에서만 핸들 기반으로 끊김 없이 새 세션으로 넘어간다.
+    private func proactiveReconnect() async {
+        guard !stopped, state == .ready else { return }
+        log.info("선제 재연결(세션 한도 전 핸드오버)")
+        emit(.info("세션 갱신 중 (무중단 재연결)"))
+        await reconnectWithHandle()
+    }
+
+    /// 저장된 재개 핸들로 재연결한다(컨텍스트 유지). 핸들은 resumptionHandle에 보관돼 있어
+    /// openSocket→sendSetup에서 자동 사용된다. 핸들이 없으면 일반(새 세션) 재연결과 동일.
+    private func reconnectWithHandle() async {
+        guard !stopped else { return }
+        openSocket()
+    }
+
     // MARK: - 메시지 빌더
 
     private func makeSetupMessage() -> SetupMessage {
@@ -436,7 +494,9 @@ actor GeminiLiveClient {
             inputAudioTranscription: .init(),
             outputAudioTranscription: .init(),
             // 기본은 top-level translationConfig.
-            translationConfig: useNestedTranslationConfig ? nil : translationConfig()
+            translationConfig: useNestedTranslationConfig ? nil : translationConfig(),
+            // 세션 재개(M2c): 보관된 핸들이 있으면 그 시점부터, 없으면 `{}`로 새 세션 재개 활성화.
+            sessionResumption: SessionResumptionConfig(handle: resumptionHandle)
         ))
     }
 
@@ -557,8 +617,16 @@ private struct SetupMessage: Encodable {
         let outputAudioTranscription: EmptyConfig
         /// top-level translationConfig(기본). 폴백 시 nil.
         let translationConfig: TranslationConfig?
+        /// 세션 재개 설정(M2c). handle nil이면 `{}`로 인코딩되어 "재개 활성화(새 세션)"를 의미.
+        let sessionResumption: SessionResumptionConfig
     }
     let setup: Setup
+}
+
+/// 세션 재개 설정(M2c). handle이 nil이면 JSONEncoder가 키를 생략해 `{}`가 되어
+/// 새 세션에서 재개 기능을 활성화한다. handle이 있으면 그 시점부터 세션을 이어받는다.
+private struct SessionResumptionConfig: Encodable {
+    let handle: String?
 }
 
 private struct GenerationConfig: Encodable {
@@ -655,12 +723,12 @@ private struct UsageMetadata: Decodable {
     }
 }
 
-/// M2c(무중단 재연결)에서 처리. 지금은 로그만.
+/// M2c: 서버의 연결 종료 예고. timeLeft 내에 핸들로 선제 재연결한다(무중단 핸드오버).
 private struct GoAway: Decodable {
     let timeLeft: String?
 }
 
-/// M2c. 세션 재개 핸들.
+/// M2c: 세션 재개 핸들 갱신. resumable=true면 newHandle을 보관해 재연결 시 컨텍스트를 잇는다.
 private struct SessionResumptionUpdate: Decodable {
     let newHandle: String?
     let resumable: Bool?
