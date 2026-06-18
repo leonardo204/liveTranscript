@@ -29,6 +29,11 @@ enum AppConfig {
     /// 한국어 자막 1줄 ≈ 화면 폭 기준 ~25자 → 2줄 ≈ 50자 전후. 튜닝 가능.
     static let defaultMaxCharsBeforeBreak: Int = 50
 
+    /// 자막 한 줄에 대략 들어가는 글자수(한국어 기준, B2). break 임계를 뷰의 줄수
+    /// (`subtitleMaxLines`)와 연동하는 환산 계수다. 줄수 × 이 값 = 누적 허용 글자수.
+    /// 예: 줄수 2 → 56자, 줄수 3 → 84자 → 실제로 2~3줄이 누적·표시된다.
+    static let charsPerSubtitleLine: Int = 28
+
     // MARK: - 비용 단가 (스펙 §9.1, 태스크 C)
 
     /// 오디오 입력 단가: $3.50 / 1M 토큰.

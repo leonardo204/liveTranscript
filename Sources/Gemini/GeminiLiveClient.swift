@@ -85,7 +85,19 @@ actor GeminiLiveClient {
     private(set) var state: State = .disconnected {
         didSet {
             guard state != oldValue else { return }
+            // 상태 전이는 저빈도 — 매번 로그(연결중/ready/error 추적). 키/URL 미포함.
+            log.info("state 전이: \(Self.stateLabel(oldValue), privacy: .public) → \(Self.stateLabel(self.state), privacy: .public)")
             emit(.state(state))
+        }
+    }
+
+    /// State를 로그용 라벨로(키/민감정보 없음).
+    private nonisolated static func stateLabel(_ s: State) -> String {
+        switch s {
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .ready: return "ready"
+        case .error: return "error"   // 메시지 본문은 별도 경로에서만 노출(중복/누출 방지)
         }
     }
 
@@ -96,7 +108,11 @@ actor GeminiLiveClient {
     private var playbackEnabled = false
 
     /// 번역 출력 오디오 재생 플래그를 갱신한다(AppState가 설정 변경/시작 시 호출).
-    func setPlaybackEnabled(_ on: Bool) { playbackEnabled = on }
+    func setPlaybackEnabled(_ on: Bool) {
+        guard playbackEnabled != on else { return }
+        log.info("setPlaybackEnabled 변경: \(self.playbackEnabled, privacy: .public) → \(on, privacy: .public)")
+        playbackEnabled = on
+    }
 
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
@@ -120,6 +136,23 @@ actor GeminiLiveClient {
     /// sessionResumptionUpdate 수신 카운터 — 로그 폭주 방지(빈도 제한, M3 부수 정리).
     /// 매 수신마다 찍지 않고 N회마다 한 번만 debug 로그를 남긴다.
     private var resumptionUpdateCount = 0
+
+    /// setupComplete를 한 번이라도 받았는지(A1 진단 — "setup 직후 close" 식별용).
+    /// teardown/openSocket에서 setupSent와 함께 갱신하지 않고, setupComplete 수신 시 true,
+    /// 새 연결 시도(openSocket) 시 false로 리셋한다.
+    private var setupCompleteReceived = false
+
+    /// modelTurn 오디오 도착 로그 스로틀 카운터(A1). 첫 도착 + N회마다 1회만 로그.
+    private var modelTurnAudioCount = 0
+    /// "modelTurn 오디오 없음(텍스트 전용)" 첫 1회 로그 여부(A1).
+    private var loggedTextOnlyTurn = false
+    /// outputAudio emit 로그 스로틀 카운터(A1). 첫 청크 + N회마다 1회만 로그.
+    private var outputAudioEmitCount = 0
+
+    /// sendAudio 송신 로그 스로틀 카운터(고빈도). 첫 1회 + N회마다 1회만 로그.
+    private var sendAudioCount = 0
+    /// sendAudio 드롭(state!=ready) 로그 스로틀 카운터(고빈도). 첫 1회 + N회마다 1회만 로그.
+    private var sendAudioDropCount = 0
 
     /// 최신 세션 재개 핸들(M2c). sessionResumptionUpdate(resumable=true)에서 갱신하고,
     /// 재연결 시 setup의 sessionResumption.handle로 넘겨 컨텍스트를 이어받는다. 키 아님(노출 무방하나 로그 자제).
@@ -175,7 +208,19 @@ actor GeminiLiveClient {
     /// 발화 청크([Float], -1...1, 16k mono)를 Gemini로 송신한다.
     /// ready 상태에서만 송신하며, 그 외에는 조용히 폐기한다(연결 전/재연결 중 청크 유실 허용 — M2a).
     func sendAudio(_ chunk: [Float]) {
-        guard state == .ready, let task else { return }
+        guard state == .ready, let task else {
+            // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): state!=ready라 청크 드롭. 드롭이 잦으면 그 자체가 신호.
+            sendAudioDropCount += 1
+            if sendAudioDropCount == 1 || sendAudioDropCount % 50 == 0 {
+                log.debug("sendAudio 드롭: 이유=state(\(Self.stateLabel(self.state), privacy: .public)) samples=\(chunk.count, privacy: .public) 누적드롭=\(self.sendAudioDropCount, privacy: .public)")
+            }
+            return
+        }
+        // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): state==ready라 송신.
+        sendAudioCount += 1
+        if sendAudioCount == 1 || sendAudioCount % 50 == 0 {
+            log.debug("sendAudio 송신: samples=\(chunk.count, privacy: .public) 누적송신=\(self.sendAudioCount, privacy: .public)")
+        }
         // 비용 입력 추정(태스크 C): 실제 송신하는 청크의 샘플 수를 방출한다(정확한 누적 시간 근거).
         emit(.sentAudio(sampleCount: chunk.count))
         let pcm = Self.floatToInt16LEData(chunk)
@@ -198,6 +243,7 @@ actor GeminiLiveClient {
         guard !stopped else { return }
         state = .connecting
         setupSent = false
+        setupCompleteReceived = false   // A1: 새 연결 시도마다 리셋(이번 연결의 setup 수신 여부 추적)
 
         // 이전 세션 정리(재연결 시) 후 새 세대 시작.
         teardownSocket()
@@ -232,7 +278,9 @@ actor GeminiLiveClient {
         // resume() — 여기서는 setup을 보내지 않는다.
         // setup은 핸드셰이크(HTTP 101)가 끝난 뒤 delegate의 didOpen 콜백에서만 전송한다.
         task.resume()
-        log.info("WebSocket 연결 시도(handshake 대기): \(self.maskedURLString, privacy: .public)")
+        // 진단: generation + 최초/재연결 구분 + 핸들 보유 여부. 마스킹 URL만(키 미포함).
+        let kind = connectAttempts > 0 ? "재연결" : "최초"
+        log.info("WebSocket 연결 시도(\(kind, privacy: .public), gen=\(gen, privacy: .public), 핸들=\(self.resumptionHandle != nil ? "있음" : "없음", privacy: .public)): \(self.maskedURLString, privacy: .public)")
     }
 
     private func teardownSocket() {
@@ -262,6 +310,7 @@ actor GeminiLiveClient {
     private func sendSetup() {
         guard let task, !setupSent else { return }
         setupSent = true
+        log.info("setup 전송: 핸들=\(self.resumptionHandle != nil ? "있음(재개)" : "없음(새 세션)", privacy: .public)")
         let setup = makeSetupMessage()
         guard let data = try? JSONEncoder().encode(setup),
               let json = String(data: data, encoding: .utf8) else {
@@ -314,7 +363,9 @@ actor GeminiLiveClient {
             // 연결 안정화 — 백오프/연속 실패 카운터를 리셋한다.
             reconnectDelay = 1.0
             connectAttempts = 0
+            setupCompleteReceived = true   // A1/B1: 정상 setup 수신 표시(연속 실패 카운터 리셋의 근거)
             state = .ready
+            log.info("setupComplete 수신 → ready")   // A1: 콘솔에도 1줄(연결 성공 시점 식별)
             emit(.info("Gemini 연결됨 (setup 완료)"))
             // 세션 한도(약 15분) 도달 전 선제 핸드오버를 예약(M2c). setupComplete마다 재무장.
             armProactiveReconnect()
@@ -330,6 +381,22 @@ actor GeminiLiveClient {
             if let inp = content.inputTranscription?.text, !inp.isEmpty {
                 emit(.source(delta: inp))
             }
+            // A1 진단: modelTurn 오디오 도착 여부를 playbackEnabled와 무관하게 추적한다.
+            // (재생이 꺼져 있어도 서버가 오디오를 보내는지/텍스트 전용인지 확정하기 위함.)
+            // mimeType/파트 수만 로그 — base64 데이터(키 아님이나 대용량)는 절대 로그하지 않는다.
+            if let parts = content.modelTurn?.parts {
+                let mimes = parts.compactMap { $0.inlineData?.mimeType }
+                let hasAudio = mimes.contains { $0.contains("audio/pcm") }
+                if hasAudio {
+                    modelTurnAudioCount += 1
+                    if modelTurnAudioCount == 1 || modelTurnAudioCount % 50 == 0 {
+                        log.info("modelTurn 수신: parts=\(parts.count) mimes=\(mimes.joined(separator: ","), privacy: .public)")
+                    }
+                } else if !loggedTextOnlyTurn {
+                    loggedTextOnlyTurn = true
+                    log.info("modelTurn 오디오 없음(텍스트 전용): parts=\(parts.count)")
+                }
+            }
             // modelTurn의 inlineData(출력 오디오 24kHz mono Int16 LE PCM).
             // 재생 플래그가 켜진 경우에만 디코드해 .outputAudio로 방출한다.
             // playbackEnabled=false면 자막 전용 앱이므로 디코드도 생략해 폐기(비용 0).
@@ -339,6 +406,11 @@ actor GeminiLiveClient {
                           let mime = inline.mimeType, mime.contains("audio/pcm"),
                           let b64 = inline.data, !b64.isEmpty,
                           let decoded = Data(base64Encoded: b64), !decoded.isEmpty else { continue }
+                    // A1: 첫 청크 및 N회마다 emit 바이트수만 로그(데이터 내용 미포함).
+                    outputAudioEmitCount += 1
+                    if outputAudioEmitCount == 1 || outputAudioEmitCount % 50 == 0 {
+                        log.debug("outputAudio emit: \(decoded.count) bytes")
+                    }
                     emit(.outputAudio(decoded))
                 }
             }
@@ -351,6 +423,8 @@ actor GeminiLiveClient {
         // usageMetadata: 출력 오디오 토큰을 추출해 비용 추정기로 방출(태스크 C).
         // responseTokensDetails(AUDIO) 우선, 없으면 responseTokenCount 폴백.
         if let usage = msg.usageMetadata, let outputTokens = usage.outputAudioTokens, outputTokens > 0 {
+            // 진단: 토큰 수만 로그(턴 단위 저빈도 — 매번). 텍스트/키 미포함.
+            log.debug("usageMetadata: outputTokens=\(outputTokens, privacy: .public) total=\(usage.totalTokenCount ?? 0, privacy: .public)")
             emit(.outputTokens(outputTokens))
         }
 
@@ -389,7 +463,8 @@ actor GeminiLiveClient {
                                     closeCode: URLSessionWebSocketTask.CloseCode,
                                     reasonLength: Int) {
         guard gen == generation, !stopped else { return }
-        log.error("WebSocket close 수신: code=\(closeCode.rawValue) reasonBytes=\(reasonLength)")
+        // A1: setupSent/setupComplete 수신 여부를 함께 찍어 "setup 직후 close"를 식별 가능하게 한다.
+        log.error("WebSocket close 수신: code=\(closeCode.rawValue) reasonBytes=\(reasonLength) setupSent=\(self.setupSent) setupComplete=\(self.setupCompleteReceived)")
 
         switch closeCode {
         case .policyViolation, .unsupportedData, .invalidFramePayloadData:
@@ -409,7 +484,8 @@ actor GeminiLiveClient {
         guard gen == generation, !stopped else { return }
 
         if let status = httpStatus {
-            log.error("WebSocket 종료: HTTP status=\(status)")
+            // A1: setupSent/setupComplete 수신 여부를 함께 찍어 "setup 직후 종료"를 식별 가능하게 한다.
+            log.error("WebSocket 종료: HTTP status=\(status) setupSent=\(self.setupSent) setupComplete=\(self.setupCompleteReceived)")
             // 핸드셰이크가 HTTP 4xx로 거부됨 → 키/모델/요청 문제. 재연결 무의미.
             if (400...499).contains(status) {
                 let hint: String
@@ -449,20 +525,27 @@ actor GeminiLiveClient {
     ///   false면 핸드셰이크 단계 실패 → 연속 실패 카운트를 올리고 상한 초과 시 중단.
     private func handleDisconnect(transient: Bool) async {
         guard !stopped else { return }
+        // A1: 끊김 진입을 transient/연속 실패 카운트와 함께 로그(재연결 storm 추적).
+        log.error("handleDisconnect transient=\(transient) attempts=\(self.connectAttempts)")
         teardownSocket()
 
-        if !transient {
-            connectAttempts += 1
-            // 핸들로 재개 시도가 핸드셰이크 단계에서 실패하면 핸들이 만료/무효일 수 있으므로
-            // 폐기하고 다음 시도는 새 세션으로 진행한다(영구 실패 방지).
-            if resumptionHandle != nil {
-                log.info("재개 핸들로 연결 실패 → 핸들 폐기 후 새 세션 재시도")
-                resumptionHandle = nil
-            }
-            if connectAttempts > maxConnectAttempts {
-                failPermanently("연결 실패 — API 키와 네트워크를 확인하세요 (\(maxConnectAttempts)회 연속 실패)")
-                return
-            }
+        // B1[무한 재연결 storm 차단]: transient(setupSent=true) 끊김도 항상 카운트한다.
+        // 기존엔 `if !transient`로 transient를 카운트에서 제외해, setup 직후 계속 끊기는
+        // 비정상 세션이 무한 재연결하는 storm이 있었다. 이제 모든 끊김이 connectAttempts를
+        // 올리고, 상한 초과 시 영구 실패로 종료한다.
+        // ── 정상 운영 무해 근거: 정상 세션은 재연결마다 setupComplete를 받아 위 setupComplete
+        //    핸들러가 connectAttempts=0으로 리셋하므로 카운터가 누적되지 않는다(영향 없음).
+        //    비정상(setup 직후 반복 close)만 maxConnectAttempts(5)회 후 명확히 종료된다.
+        connectAttempts += 1
+        // 핸들로 재개 시도가 핸드셰이크 단계에서 실패하면 핸들이 만료/무효일 수 있으므로
+        // 폐기하고 다음 시도는 새 세션으로 진행한다(영구 실패 방지). 핸들 폐기 방어는 유지.
+        if resumptionHandle != nil {
+            log.info("재개 핸들로 연결 실패 → 핸들 폐기 후 새 세션 재시도")
+            resumptionHandle = nil
+        }
+        if connectAttempts > maxConnectAttempts {
+            failPermanently("연결 실패 — API 키와 네트워크를 확인하세요 (\(maxConnectAttempts)회 연속 실패)")
+            return
         }
 
         let delay = reconnectDelay
@@ -484,6 +567,7 @@ actor GeminiLiveClient {
     private func armProactiveReconnect() {
         proactiveReconnectTask?.cancel()
         let interval = proactiveReconnectInterval
+        log.info("선제 재연결 타이머 arm: \(interval, format: .fixed(precision: 0))s 후")
         proactiveReconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             guard !Task.isCancelled else { return }

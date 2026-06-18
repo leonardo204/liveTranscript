@@ -9,6 +9,23 @@ final class SystemAudioDucker {
     private var savedVolume: Float?
     private let log = Logger(subsystem: AppConfig.bundleIdentifier, category: "AudioDucker")
 
+    /// 기본 출력 장치의 사람이 읽는 이름(로깅용 — "어느 장치를 덕킹하는지" 식별).
+    private func defaultOutputDeviceName(_ dev: AudioDeviceID) -> String {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var dataSize = UInt32(MemoryLayout<CFString?>.size)
+        var cfString: CFString?
+        let status = withUnsafeMutablePointer(to: &cfString) { ptr -> OSStatus in
+            ptr.withMemoryRebound(to: CFString.self, capacity: 1) { _ in
+                AudioObjectGetPropertyData(dev, &addr, 0, nil, &dataSize, ptr)
+            }
+        }
+        guard status == noErr, let name = cfString as String? else { return "(이름 미상)" }
+        return name
+    }
+
     private func defaultOutputDevice() -> AudioDeviceID? {
         var deviceID = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
@@ -52,12 +69,23 @@ final class SystemAudioDucker {
     /// 현재 볼륨을 1회 저장하고 지정 레벨로 덕킹한다(이미 덕킹 중이면 레벨만 갱신).
     func duck(to level: Float) {
         if savedVolume == nil { savedVolume = currentVolume() }
-        if !setVolume(level) { log.info("출력 장치 볼륨 제어 미지원 — 덕킹 생략") }
+        // 진단: 어느 기본 출력 장치를 어느 레벨로 덕킹하는지 + 저장한 원래 볼륨.
+        if let dev = defaultOutputDevice() {
+            log.info("duck: 장치=\(self.defaultOutputDeviceName(dev), privacy: .public)(id=\(dev, privacy: .public)) 원래볼륨=\(self.savedVolume ?? -1, privacy: .public) 목표=\(level, privacy: .public)")
+        }
+        if setVolume(level) {
+            log.info("duck: 적용 성공")
+        } else {
+            log.info("출력 장치 볼륨 제어 미지원 — 덕킹 생략")
+        }
     }
 
     /// 저장해 둔 원래 볼륨으로 복원한다(없으면 무시).
     func restore() {
-        if let v = savedVolume { setVolume(v) }
+        if let v = savedVolume {
+            log.info("restore: 원래 볼륨 복원=\(v, privacy: .public)")
+            setVolume(v)
+        }
         savedVolume = nil
     }
 }

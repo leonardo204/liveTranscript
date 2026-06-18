@@ -60,6 +60,11 @@ struct SettingsView: View {
     // 설정 초기화 확인 다이얼로그 표시 여부(일반 탭).
     @State private var showResetConfirm = false
 
+    // 번역 오디오 재생 ON 시 표시할 경고 팝업(입력 직접 캡쳐 전환 + 출력 선택 안내).
+    @State private var showAudioOutputWarning = false
+    // 번역 오디오 출력 장치 후보 목록(오디오 탭 onAppear/새로고침 시 갱신).
+    @State private var outputDevices: [AudioOutputDevice] = []
+
     var body: some View {
         NavigationSplitView {
             // 사이드바: 8개 카테고리 목록. selection은 Optional 바인딩.
@@ -83,6 +88,7 @@ struct SettingsView: View {
         .onAppear {
             refreshPermissions()
             refreshScreens()
+            outputDevices = AudioDeviceEnumerator.outputDevices()
         }
     }
 
@@ -113,10 +119,49 @@ struct SettingsView: View {
 
     private var subtitleTab: some View {
         Form {
+            translationLanguageSection
             subtitlePositionSection
             subtitleStyleSection
         }
         .formStyle(.grouped)
+    }
+
+    // MARK: - 번역 언어
+
+    /// 번역 대상 언어 선택지(BCP-47 코드 + 한글 라벨). Picker selection 타입은 String.
+    /// 기본값 ko가 포함되어 있어 현재값이 항상 목록에 존재한다(빈 선택 방지).
+    private static let languageOptions: [(code: String, label: String)] = [
+        ("ko", "한국어"),
+        ("en", "English"),
+        ("ja", "日本語"),
+        ("zh", "中文(简体)"),
+        ("es", "Español"),
+        ("fr", "Français"),
+        ("de", "Deutsch"),
+        ("vi", "Tiếng Việt"),
+        ("th", "ไทย"),
+        ("id", "Bahasa Indonesia"),
+    ]
+
+    /// 번역 대상 언어 선택 Section. 번역 중 언어를 바꾸면 즉시 Gemini가 재연결되어 적용된다.
+    private var translationLanguageSection: some View {
+        Section("번역") {
+            Picker("번역 언어", selection: Binding(
+                get: { appState.settings.targetLanguageCode },
+                set: {
+                    appState.settings.targetLanguageCode = $0
+                    appState.reloadTranslationSession()
+                }
+            )) {
+                ForEach(Self.languageOptions, id: \.code) { opt in
+                    Text(opt.label).tag(opt.code)
+                }
+            }
+            .pickerStyle(.menu)
+            Text("번역 중 언어를 바꾸면 즉시 재연결되어 적용됩니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var audioTab: some View {
@@ -336,32 +381,74 @@ struct SettingsView: View {
         let settings = appState.settings
         return Group {
             Section("번역 오디오") {
-                Toggle("번역 오디오 재생", isOn: audioBinding(\.translatedAudioPlaybackEnabled))
+                // 재생 ON 플로우: 끔→켬 순간 입력을 직접 캡쳐(systemTap)로 자동 전환하고
+                // 경고 팝업을 띄운다(피드백 방지 + 출력 장치 선택 유도).
+                Toggle("번역 오디오 재생", isOn: Binding(
+                    get: { settings.translatedAudioPlaybackEnabled },
+                    set: { newValue in
+                        let wasOff = !settings.translatedAudioPlaybackEnabled
+                        settings.translatedAudioPlaybackEnabled = newValue
+                        if newValue && wasOff {
+                            appState.audio.selectSystemTap()   // 입력 → 직접 캡쳐(피드백 방지)
+                            outputDevices = AudioDeviceEnumerator.outputDevices()
+                            showAudioOutputWarning = true       // 경고 팝업
+                        }
+                        appState.applyAudioOutputPolicy()
+                    }
+                ))
+
+                // 재생이 켜져 있을 때만 출력 장치 선택 드롭다운을 토글 아래에 표시한다.
+                if settings.translatedAudioPlaybackEnabled {
+                    Picker("출력 장치", selection: Binding(
+                        get: { settings.translatedAudioOutputDeviceUID ?? "" },
+                        set: {
+                            settings.translatedAudioOutputDeviceUID = $0.isEmpty ? nil : $0
+                            appState.applyAudioOutputPolicy()
+                        }
+                    )) {
+                        Text("시스템 기본").tag("")
+                        ForEach(outputDevices) { device in
+                            Text(device.name).tag(device.uid)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    Button("출력 장치 새로고침") {
+                        outputDevices = AudioDeviceEnumerator.outputDevices()
+                    }
+                }
+
+                // B3: 재생 off일 때 아래 컨트롤이 회색(disabled)이 되어 on/off 상태가 안 보이던 혼동 제거.
+                // disabled를 걷어내 항상 색상으로 상태가 보이게 하고, 적용 여부는 caption으로 안내한다.
+                if !settings.translatedAudioPlaybackEnabled {
+                    Text("번역 오디오 재생을 켜야 아래 볼륨/덕킹이 적용됩니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 VStack(alignment: .leading) {
+                    // B3: .disabled 제거 — 재생이 off여도 값은 미리 설정 가능(정책은 재생 on일 때만 적용).
                     Slider(
                         value: audioBinding(\.translatedAudioVolume),
                         in: 0...1
                     ) {
                         Text("번역 볼륨")
                     }
-                    .disabled(!settings.translatedAudioPlaybackEnabled)
                     LabeledContent("번역 볼륨", value: "\(Int(settings.translatedAudioVolume * 100))%")
                 }
             }
 
             Section("원문(시스템) 오디오") {
+                // B3: .disabled 제거 — 토글 색상으로 on/off가 항상 구분되게 한다.
                 Toggle("원문 볼륨 덕킹", isOn: audioBinding(\.originalAudioDuckingEnabled))
-                    .disabled(!settings.translatedAudioPlaybackEnabled)
 
                 VStack(alignment: .leading) {
+                    // B3: .disabled 제거 — 덕킹 off여도 값 미리 설정 가능.
                     Slider(
                         value: audioBinding(\.originalAudioDuckVolume),
                         in: 0...1
                     ) {
                         Text("원문 볼륨")
                     }
-                    .disabled(!settings.translatedAudioPlaybackEnabled || !settings.originalAudioDuckingEnabled)
                     LabeledContent("원문 볼륨", value: "\(Int(settings.originalAudioDuckVolume * 100))%")
                 }
 
@@ -369,6 +456,11 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+        .alert("번역 오디오 재생", isPresented: $showAudioOutputWarning) {
+            Button("확인") {}
+        } message: {
+            Text("입력을 ‘시스템 직접 캡쳐’로 전환했습니다. 스피커/헤드폰으로 듣고 피드백을 막으려면 아래에서 번역 오디오 ‘출력 장치’를 선택하세요. 출력을 BlackHole 등 캡처용 가상 장치로 두면 번역이 들리지 않고 피드백 루프가 생깁니다.")
         }
     }
 

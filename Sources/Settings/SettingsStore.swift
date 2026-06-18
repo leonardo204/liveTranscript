@@ -74,6 +74,7 @@ final class SettingsStore {
         // 번역 오디오 출력/덕킹 (M3+)
         static let translatedAudioPlaybackEnabled = "audio.playback.enabled"
         static let translatedAudioVolume = "audio.playback.volume"
+        static let translatedAudioOutputDeviceUID = "audio.playback.outputDeviceUID"
         static let originalAudioDuckingEnabled = "audio.duck.enabled"
         static let originalAudioDuckVolume = "audio.duck.volume"
     }
@@ -176,6 +177,8 @@ final class SettingsStore {
         self.translatedAudioVolume = defaults.double(forKey: Key.translatedAudioVolume)
         self.originalAudioDuckingEnabled = defaults.bool(forKey: Key.originalAudioDuckingEnabled)
         self.originalAudioDuckVolume = defaults.double(forKey: Key.originalAudioDuckVolume)
+        // 출력 장치 UID 복원(미설정이면 nil = 시스템 기본 출력).
+        self.translatedAudioOutputDeviceUID = defaults.string(forKey: Key.translatedAudioOutputDeviceUID)
     }
 
     // MARK: - 입력 소스 영속화 (태스크 A)
@@ -404,6 +407,19 @@ final class SettingsStore {
         didSet { defaults.set(originalAudioDuckVolume, forKey: Key.originalAudioDuckVolume) }
     }
 
+    /// 번역 오디오를 내보낼 출력 장치 UID. nil이면 시스템 기본 출력 사용(기본값).
+    /// 피드백 방지를 위해 캡처용 가상 장치가 아닌 스피커/헤드폰을 권장한다.
+    /// subtitleScreenID(Int?)와 동일한 nil=removeObject 패턴으로 결정적 영속화한다.
+    var translatedAudioOutputDeviceUID: String? {
+        didSet {
+            if let uid = translatedAudioOutputDeviceUID {
+                defaults.set(uid, forKey: Key.translatedAudioOutputDeviceUID)
+            } else {
+                defaults.removeObject(forKey: Key.translatedAudioOutputDeviceUID)
+            }
+        }
+    }
+
     // MARK: - 번역 (M2a)
 
     /// 번역 대상 언어 코드(BCP-47, 기본 ko). GeminiLiveClient setup에 사용.
@@ -484,6 +500,7 @@ final class SettingsStore {
             Key.subtitleBackgroundEnabled, Key.subtitleBackgroundOpacity,
             Key.subtitleTextAlign, Key.subtitleMaxLines,
             Key.translatedAudioPlaybackEnabled, Key.translatedAudioVolume,
+            Key.translatedAudioOutputDeviceUID,
             Key.originalAudioDuckingEnabled, Key.originalAudioDuckVolume,
         ]
         for key in allKeys { defaults.removeObject(forKey: key) }
@@ -508,6 +525,7 @@ final class SettingsStore {
         // 번역 오디오 출력/덕킹.
         translatedAudioPlaybackEnabled = AudioDefault.playbackEnabled
         translatedAudioVolume = AudioDefault.volume
+        translatedAudioOutputDeviceUID = nil   // 시스템 기본 출력으로 복귀
         originalAudioDuckingEnabled = AudioDefault.duckingEnabled
         originalAudioDuckVolume = AudioDefault.duckVolume
     }

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import os
 import Security
 
 /// 앱 전역 상태 (M1.5).
@@ -57,6 +58,33 @@ final class AppState {
     /// 수신 이벤트 소비 Task.
     @ObservationIgnored private var eventTask: Task<Void, Never>?
 
+    // MARK: - 동시성-안전 상태머신 (reconciler)
+    //
+    // 빠른 시작/정지 연타에도 오디오/Gemini가 좀비/중복 생성되지 않도록,
+    // "사용자 의도(desired)"와 "실제 파이프라인(actual)"을 분리하고
+    // **항상 1개의 직렬 reconciler Task**만 실제 전환(start/stop/reload)을
+    // await로 한 번에 하나씩 처리한다(불변식).
+    //
+    // 동시성 안전성:
+    // - reconcileTask는 동시에 1개만 존재(kickReconcile 가드).
+    // - 사용자의 빠른 연타는 desiredRunning만 뒤집고 isRunning(UI)에 즉시 반영하며,
+    //   실제 전환은 reconciler가 직렬로 수렴시킨다(겹침 없음).
+    // - reconcileLoop의 while 조건 평가와 reconcileTask=nil 대입 사이에는 await가
+    //   없으므로(둘 다 동기, MainActor), 그 틈에 toggleCapture(동기)가 끼어들어
+    //   전환을 누락/중복시키는 일이 없다.
+
+    /// 사용자 의도(최신). isRunning은 이를 즉시 미러한다.
+    @ObservationIgnored private var desiredRunning = false
+    /// 실제 파이프라인 on 여부(audio+Gemini 실제 가동 상태).
+    @ObservationIgnored private var actualRunning = false
+    /// 키/언어 변경 등으로 Gemini 재연결이 필요함을 표시.
+    @ObservationIgnored private var needsGeminiReload = false
+    /// 단 하나만 살아있는 직렬 reconciler Task.
+    @ObservationIgnored private var reconcileTask: Task<Void, Never>?
+    /// 영구 실패 사유(best-effort). performStop이 라벨을 "연결 안 됨"으로 덮을 때,
+    /// 정지 의도이면서 이 값이 있으면 사유를 유지해 사용자에게 노출한다.
+    @ObservationIgnored private var lastFailureReason: String?
+
     /// 앱 정상 종료(Cmd-Q) 옵저버. 종료 시 덕킹된 시스템 볼륨을 복원하고 재생을 정지한다.
     /// 한계: SIGKILL/강제 크래시 시에는 이 콜백이 호출되지 않아 덕킹이 복원되지 않을 수 있다.
     @ObservationIgnored private var willTerminateObserver: NSObjectProtocol?
@@ -86,6 +114,16 @@ final class AppState {
 
     /// 현재 연결 테스트 상태(설정 UI가 관찰).
     private(set) var connectionTestState: ConnectionTestState = .idle
+
+    /// 진단 로그용 Logger(세션 수명/오디오 정책 호출 추적, A2). 민감정보(키) 미포함.
+    @ObservationIgnored private let log = Logger(subsystem: AppConfig.bundleIdentifier, category: "AppState")
+
+    /// outputAudio enqueue 로그 스로틀 카운터(A2). 첫 1회 + N회마다 1회만 로그.
+    @ObservationIgnored private var outputAudioEnqueueCount = 0
+
+    /// setPlaybackEnabled 적용을 직렬 체이닝하는 Task. 새 Task가 이전 Task 완료를
+    /// await해 actor 진입 순서를 FIFO로 보장한다(on→off 연타 시 최종값 역전 방지).
+    @ObservationIgnored private var playbackSyncTask: Task<Void, Never>?
 
     init(apiKeyProvider: APIKeyProvider = ResolvedAPIKeyProvider()) {
         self.apiKeyProvider = apiKeyProvider
@@ -145,11 +183,15 @@ final class AppState {
         }
         do {
             try provider.save(trimmed)
+            log.info("saveAPIKey 성공(키 미포함) → reloadTranslationSession 호출")
             refreshKeyState()
             // 저장하면 직전 테스트 결과는 무의미 — 초기화.
             connectionTestState = .idle
+            // 번역 중이면 새 키로 즉시 안전 재연결(정지 중이면 무시 — 다음 시작에 자연 반영). 키 값은 노출하지 않는다.
+            reloadTranslationSession()
             return .success(())
         } catch {
+            log.error("saveAPIKey 실패(키 미포함): \(error.localizedDescription, privacy: .public)")
             return .failure(error)
         }
     }
@@ -162,10 +204,14 @@ final class AppState {
         }
         do {
             try provider.clear()
+            log.info("clearAPIKey 성공 → reloadTranslationSession 호출")
             refreshKeyState()
             connectionTestState = .idle
+            // 번역 중에 키를 지우면 재연결 시 키가 없어 performGeminiReload가 정지로 수렴한다(정지 중이면 무시).
+            reloadTranslationSession()
             return .success(())
         } catch {
+            log.error("clearAPIKey 실패: \(error.localizedDescription, privacy: .public)")
             return .failure(error)
         }
     }
@@ -216,51 +262,143 @@ final class AppState {
     /// 번역 시작/정지. **자막 HUD만** 캡처 상태에 연동하고, 제어 HUD는 건드리지 않는다.
     /// (제어 HUD는 메뉴 "제어 HUD 표시" 토글로만 표시/숨김 — 정지해도 남아 있어야 함.)
     func toggleCapture() {
-        // 시작/정지의 단일 진실은 `isRunning`(사용자 의도)이다.
-        // `audio.isCapturing`은 입력 소스 hot-swap 재시작 실패(-10877 등)로
-        // 사용자 의도와 어긋날 수 있으므로 분기 기준으로 쓰지 않는다.
-        // (이전 버그: hot-swap 실패로 isCapturing=false → "정지"가 else(시작) 분기로 오작동)
-        if isRunning {
-            stopSession()
-        } else {
-            startSession()
-        }
+        // 시작/정지의 단일 진실은 `desiredRunning`(사용자 의도)이다.
+        // 빠른 연타에도 의도만 즉시 뒤집고 isRunning(버튼 상태)에 미러한다.
+        // 실제 파이프라인 전환은 reconciler가 직렬로 수렴시킨다(겹침/좀비 없음).
+        desiredRunning.toggle()
+        log.info("의도 토글: desired=\(self.desiredRunning, privacy: .public)")
+        isRunning = desiredRunning   // 버튼 상태 즉시 반영(연타에도 UI는 항상 최신 의도)
+        kickReconcile()
     }
 
-    /// 번역 세션을 깨끗하게 시작한다. 항상 새 audio + 새 Gemini + 자막 정책 on.
-    private func startSession() {
+    /// 번역 설정(키/언어 등) 변경 시 호출 — 실행 중이면 Gemini만 안전 재연결,
+    /// 정지 중이면 무시(다음 시작에 자연 반영). (Run 3에서 키/언어 변경 경로가 배선 예정.)
+    func reloadTranslationSession() {
+        guard desiredRunning else {
+            log.info("reloadTranslationSession: 무시(desiredRunning=false — 다음 시작에 자연 반영)")
+            return
+        }
+        log.info("reloadTranslationSession: 재연결 요청(desiredRunning=true) → needsGeminiReload=true")
+        needsGeminiReload = true
+        kickReconcile()
+    }
+
+    // MARK: - reconciler (단일 직렬 수렴 루프)
+
+    /// reconciler가 이미 수렴 중이면 플래그만 갱신하고 그 태스크가 처리하도록 둔다.
+    /// 동시 1개 보장(동시성 불변식의 핵심 가드).
+    private func kickReconcile() {
+        guard reconcileTask == nil else { return }   // 이미 수렴 중 → 그 태스크가 desired/플래그를 마저 처리
+        reconcileTask = Task { [weak self] in await self?.reconcileLoop() }
+    }
+
+    /// desired/플래그가 더 이상 전환을 요구하지 않을 때까지 한 번에 하나씩 await로 수렴시킨다.
+    /// race-free 근거: 아래 while 조건 평가 → (false면) reconcileTask=nil 대입까지
+    /// **await가 없으므로**, 그 사이 동기 toggleCapture가 끼어들 수 없다.
+    /// toggle은 항상 while 평가 전(이미 수렴 중이면 가드로 무시) 또는 nil 대입 후에만 실행된다.
+    private func reconcileLoop() async {
+        while needsTransition() {
+            // 진단: 매 반복의 desired/actual/needsGeminiReload + 선택 분기(상태머신 추적).
+            if desiredRunning && !actualRunning {
+                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) reload=\(self.needsGeminiReload, privacy: .public) → performStart")
+                await performStart()
+            } else if !desiredRunning && actualRunning {
+                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) reload=\(self.needsGeminiReload, privacy: .public) → performStop")
+                await performStop()
+            } else if desiredRunning && actualRunning && needsGeminiReload {
+                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) reload=\(self.needsGeminiReload, privacy: .public) → performGeminiReload")
+                needsGeminiReload = false
+                await performGeminiReload()
+            } else {
+                break
+            }
+        }
+        reconcileTask = nil   // ← while(false) 직후 동기 대입(중간 await 없음 → toggle 끼어듦 차단)
+    }
+
+    /// 추가 전환이 필요한지 판정.
+    private func needsTransition() -> Bool {
+        if desiredRunning != actualRunning { return true }
+        if desiredRunning && needsGeminiReload { return true }
+        return false
+    }
+
+    /// 번역 세션을 깨끗하게 시작한다(직렬 reconciler가 호출). 항상 새 audio + 새 Gemini + 자막 정책 on.
+    private func performStart() async {
+        log.info("performStart 진입")
         // 사용자 피드백: 키 유무와 무관하게 "시작"을 누르면 제어 HUD는 떠야 한다.
         // 마스터 토글이 꺼져 있어도 강제로 켜고 표시한다.
         settings.monitorEnabled = true
         hud.applyEnabledPolicy()   // 토글 변경을 반영(설정 UI와 동기)
         hud.show()
 
-        // 키가 없으면 캡처/연결은 시작하지 않고 HUD에 에러만 노출(isRunning은 false 유지).
+        // 키가 없으면 캡처/연결을 시작하지 않고, 의도를 정지로 되돌려 버튼이 "시작"으로 유지되게 한다.
         guard let key = geminiAPIKey(), !key.isEmpty else {
+            log.error("performStart 중단: 키 없음 → 의도 정지로 복귀")
             geminiStatus = "API 키 없음 — 설정에서 Gemini API 키를 입력하세요"
+            desiredRunning = false
+            isRunning = false
+            actualRunning = false
+            needsGeminiReload = false
             return
         }
-        // 의도를 먼저 확정(이후 콜백/hot-swap 경로가 이 값을 신뢰한다).
-        isRunning = true
+        log.info("performStart: 키 있음 → 캡처+Gemini 시작")
+        lastFailureReason = nil   // 새 세션 시작 → 직전 영구 실패 사유 클리어(정지 라벨 오염 방지)
         startGemini(apiKey: key)
         audio.requestPermissionAndStart()
         // 권한 콜백 후 isCapturing이 true가 된다. UI는 isRunning(버튼 상태)과
         // audio.isCapturing(실제 캡처 표시)을 각각 관찰한다.
         subtitleOverlay.applyCapturePolicy(isCapturing: true)
-        // 번역 오디오 출력/덕킹 정책 적용(설정+실행상태 기준).
+        // 번역 오디오 출력/덕킹 정책 적용(설정+실행상태 기준 — actualRunning 확정 전이지만
+        // applyAudioOutputPolicy는 isRunning을 보고, isRunning은 desiredRunning을 미러한다).
         applyAudioOutputPolicy()
+        needsGeminiReload = false
+        actualRunning = true
+        log.info("performStart 완료: actualRunning=true")
     }
 
-    /// 번역 세션을 확실히 정지한다. audio + Gemini + 자막 오버레이 모두 내려간다.
-    /// 어떤 경로(정상 정지/오류 정리)로 들어와도 동일하게 동작한다(멱등).
-    private func stopSession() {
-        isRunning = false
+    /// 번역 세션을 확실히 정지한다(직렬 reconciler가 호출). audio + Gemini + 자막 오버레이 모두 내려간다.
+    /// **이전 Gemini client.stop()이 끝날 때까지 await**한 뒤에만 actualRunning=false로 만들어,
+    /// 다음 시작이 이전 세션과 겹치지 않게 보장한다.
+    private func performStop() async {
+        log.info("performStop 진입")
         audio.stop()
-        stopGemini()
+        await stopGemini()   // ← fire-and-forget 금지: client.stop() 완료까지 대기(좀비/중복 방지)
         subtitleOverlay.applyCapturePolicy(isCapturing: false)
         // 번역 오디오 재생 정지 + 시스템 볼륨 복원.
         translatedAudioPlayer.stop()
         systemAudioDucker.restore()
+        // 정지 라벨은 영구 실패 사유가 있으면 그것을 우선 노출(best-effort).
+        if let reason = lastFailureReason {
+            geminiStatus = reason
+        }
+        actualRunning = false
+        needsGeminiReload = false
+        log.info("performStop 완료: actualRunning=false")
+    }
+
+    /// 캡처(audio)는 유지한 채 Gemini만 안전 재연결한다(직렬 reconciler가 호출).
+    /// 이전 client.stop()을 끝까지 await한 뒤 새 키로 재시작. 키가 없으면 정지로 수렴.
+    private func performGeminiReload() async {
+        log.info("performGeminiReload 진입")
+        await stopGemini()   // 이전 세션 완전 정지까지 대기
+        guard let key = geminiAPIKey(), !key.isEmpty else {
+            log.error("performGeminiReload 중단: 키 없음 → 정지로 수렴")
+            geminiStatus = "API 키 없음 — 설정에서 Gemini API 키를 입력하세요"
+            desiredRunning = false
+            isRunning = false
+            // 캡처도 내려야 하므로 다음 루프에서 performStop이 돌도록 actualRunning은 유지.
+            // 다만 덕킹/재생은 즉시 정리한다(다음 performStop까지 1틱 덕킹이 유지되는 것 방지).
+            // performStop이 멱등으로 다시 호출해도 무해하다.
+            translatedAudioPlayer.stop()
+            systemAudioDucker.restore()
+            return
+        }
+        log.info("performGeminiReload: 키 있음 → Gemini 재시작")
+        startGemini(apiKey: key)
+        // 자막/오디오 정책은 그대로 유지(캡처는 끊기지 않았다).
+        applyAudioOutputPolicy()
+        log.info("performGeminiReload 완료")
     }
 
     // MARK: - Gemini 수명주기 (M2a)
@@ -268,8 +406,10 @@ final class AppState {
     /// Gemini 연결을 시작하고 오디오 파이프라인(onChunk → sendAudio)을 배선한다.
     /// "번역 시작" 시 호출. 키는 호출자가 검증해 전달한다(로그/HUD에 키 노출 금지).
     private func startGemini(apiKey: String) {
-        // 이전 세션 잔재 정리(이전 client.stop()으로 stopped=true 보장 → 재연결 차단).
-        stopGemini()
+        // 이전 세션 잔재 정리(동기 부분만): onChunk/eventTask 해제 + 핸들 비움.
+        // 실제 client.stop()까지의 대기는 호출처(performStart/performGeminiReload)에서
+        // 이미 await로 보장하므로 여기서는 동기 정리만 한다(멱등).
+        clearGeminiHandles()
         subtitles.reset()
         cost.resetSession()   // 세션 비용은 번역 시작마다 0에서 시작(누적은 유지, 태스크 C).
 
@@ -299,21 +439,29 @@ final class AppState {
         }
     }
 
-    /// Gemini 연결을 종료하고 파이프라인을 해제한다("번역 정지").
-    private func stopGemini() {
+    /// Gemini 파이프라인의 **동기 핸들만** 해제한다(onChunk/eventTask/gemini/상태 라벨).
+    /// 살아있던 client는 지역 변수로 빼 반환하므로, 호출자가 await로 정지를 마칠 수 있다.
+    private func clearGeminiHandles() -> GeminiLiveClient? {
         audio.onChunk = nil
         eventTask?.cancel()
         eventTask = nil
         // 현재 client를 지역 변수로 분리한 뒤 즉시 self.gemini를 비운다.
         // client.stop()은 actor 내부에서 stopped=true + generation++ + teardownSocket()을
-        // 동기적으로 수행하므로, 이 stop이 끝나면 해당 client는 어떤 경로로도 재연결하지 않는다.
+        // 수행하므로, 이 stop이 끝나면 해당 client는 어떤 경로로도 재연결하지 않는다.
         // (각 client는 독립적이라 새 세션 생성과 이전 세션 정지가 서로를 오염시키지 않는다.)
         let client = gemini
         gemini = nil
         translating = false
         geminiStatus = "연결 안 됨"
-        if let client {
-            Task { await client.stop() }
+        return client
+    }
+
+    /// Gemini 연결을 종료하고 파이프라인을 해제한다("번역 정지").
+    /// fire-and-forget이 아니라 **client.stop()이 끝날 때까지 await**한다(빠른 토글 시
+    /// 이전 정지가 끝나기 전에 새 세션이 시작돼 겹치는 것을 막는다). 멱등.
+    private func stopGemini() async {
+        if let client = clearGeminiHandles() {
+            await client.stop()
         }
     }
 
@@ -322,10 +470,12 @@ final class AppState {
         switch event {
         case .state(let state):
             switch state {
-            case .disconnected: geminiStatus = "연결 안 됨"
-            case .connecting: geminiStatus = "연결 중…"
-            case .ready: geminiStatus = "번역 중"
-            case .error(let message): geminiStatus = message  // 키 미포함(클라이언트가 보장)
+            case .disconnected: geminiStatus = "연결 안 됨"; log.info("event.state=disconnected")
+            case .connecting: geminiStatus = "연결 중…"; log.info("event.state=connecting")
+            case .ready: geminiStatus = "번역 중"; log.info("event.state=ready")
+            case .error(let message):
+                geminiStatus = message  // 키 미포함(클라이언트가 보장)
+                log.error("event.state=error: \(message, privacy: .public)")
             }
         case .translation(let delta):
             subtitles.ingestTranslationDelta(delta)
@@ -336,15 +486,28 @@ final class AppState {
         case .sentAudio(let sampleCount):
             cost.addSentAudio(sampleCount: sampleCount)   // 입력 비용 누적(태스크 C).
         case .outputTokens(let tokens):
+            log.debug("event.outputTokens=\(tokens, privacy: .public) (비용 누적)")
             cost.addOutputTokens(tokens)                  // 출력 비용 누적(태스크 C).
         case .outputAudio(let data):
+            // A2: enqueue 도달 여부 추적(첫 1회 + N회마다). 바이트수만 로그(데이터 내용 미포함).
+            outputAudioEnqueueCount += 1
+            if outputAudioEnqueueCount == 1 || outputAudioEnqueueCount % 50 == 0 {
+                log.debug("outputAudio enqueue (\(data.count) bytes)")
+            }
             translatedAudioPlayer.enqueue(int16LE: data)  // 번역 출력 오디오 재생(M3+).
         case .info(let message):
+            log.info("event.info: \(message, privacy: .public)")
             geminiStatus = message
         case .permanentFailure(let reason):
-            // 영구 실패 → 세션을 확실히 정리(오디오 재생 정지 + 시스템 볼륨 복원 + isRunning=false).
-            stopSession()
-            geminiStatus = reason   // stopSession이 "연결 안 됨"으로 덮으므로 사유를 다시 노출
+            // 영구 실패 → 의도를 정지로 돌리고 reconciler에 정리를 맡긴다(직렬 안전).
+            // reconciler가 performStop으로 player/ducker/audio/gemini를 한 번에 정리한다.
+            log.error("permanentFailure → 세션 정지: \(reason, privacy: .public)")
+            desiredRunning = false
+            isRunning = false
+            needsGeminiReload = false
+            lastFailureReason = reason   // performStop이 정지 라벨을 덮을 때 이 사유를 우선 노출
+            geminiStatus = reason
+            kickReconcile()
         }
     }
 
@@ -372,12 +535,17 @@ final class AppState {
     /// 주의(설계상 부분 덕킹): 번역 오디오도 시스템 기본 출력 장치로 나가므로,
     /// 덕킹을 켜면 원문과 함께 번역 소리도 같이 작아진다(별도 출력 라우팅은 미지원).
     func applyAudioOutputPolicy() {
+        // A2: 호출 진입 + 분기 추적(오디오 정책 thrash 원인 확정용).
+        log.info("applyAudioOutputPolicy: playback=\(self.settings.translatedAudioPlaybackEnabled) isRunning=\(self.isRunning)")
         let live = gemini   // 살아있는 client(actor) 참조
 
         if settings.translatedAudioPlaybackEnabled, isRunning {
+            log.info("applyAudioOutputPolicy: 분기=start (재생 시작 + 덕킹 적용)")
             translatedAudioPlayer.volume = Float(settings.translatedAudioVolume)
+            // 설정된 출력 장치로 라우팅(시작 직전 반영 — nil이면 시스템 기본).
+            translatedAudioPlayer.setOutputDevice(uid: settings.translatedAudioOutputDeviceUID)
             translatedAudioPlayer.start()
-            if let live { Task { await live.setPlaybackEnabled(true) } }
+            if let live { syncPlaybackEnabled(true, to: live) }
             // 덕킹: on이면 원문(과 번역) 출력을 함께 낮춘다, off면 복원.
             if settings.originalAudioDuckingEnabled {
                 systemAudioDucker.duck(to: Float(settings.originalAudioDuckVolume))
@@ -385,11 +553,20 @@ final class AppState {
                 systemAudioDucker.restore()
             }
         } else {
+            log.info("applyAudioOutputPolicy: 분기=stop (재생 중지 + 볼륨 복원)")
             // 재생 off거나 정지 상태: 재생 중지 + 볼륨 복원 + client 디코드 중단.
             translatedAudioPlayer.stop()
             systemAudioDucker.restore()
-            if let live { Task { await live.setPlaybackEnabled(false) } }
+            if let live { syncPlaybackEnabled(false, to: live) }
         }
+    }
+
+    /// setPlaybackEnabled 호출을 직렬 체이닝한다. 새 Task가 직전 Task의 완료를
+    /// await한 뒤 actor에 진입하므로 호출 순서(FIFO)가 보장된다 → 마지막 호출이 최종값.
+    /// (fire-and-forget Task 난사 시 actor 진입 순서 미보장으로 최종값이 뒤집히던 문제 수정.)
+    private func syncPlaybackEnabled(_ on: Bool, to live: GeminiLiveClient) {
+        let prev = playbackSyncTask
+        playbackSyncTask = Task { await prev?.value; await live.setPlaybackEnabled(on) }
     }
 
     // MARK: - 미리보기/리셋 (설정 UI)

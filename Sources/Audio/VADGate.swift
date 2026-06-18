@@ -80,6 +80,9 @@ actor VADGate {
     /// 드롭된 청크 누적 카운트(과도 적체 진단용).
     private var droppedCount = 0
 
+    /// 프레임 통과(forward) 로그 스로틀 카운터(고빈도). 첫 1회 + N회마다 1회만 로그.
+    private var forwardFrameCount = 0
+
     // MARK: - 세그멘테이션 설정 (pre-roll 포함)
 
     /// speechPadding으로 pre-roll을 확보해 첫 음절 잘림을 막는다(스펙: 200ms 권장).
@@ -127,6 +130,7 @@ actor VADGate {
 
     /// 스트림 상태를 초기화한다(캡처 재시작 시). 모델은 유지, 버퍼/상태만 리셋.
     func resetStream() {
+        logger.info("resetStream: 스트림 상태 초기화 (speaking=\(self.speaking, privacy: .public) pending=\(self.pending.count, privacy: .public))")
         if manager != nil {
             streamState = .initial()
         }
@@ -134,6 +138,7 @@ actor VADGate {
         prevFrame = nil
         pending.removeAll(keepingCapacity: true)
         droppedCount = 0
+        forwardFrameCount = 0
         if speaking {
             speaking = false
             onSpeechStateChange(false)
@@ -219,12 +224,16 @@ actor VADGate {
                         onSpeechStateChange(true)
                         // pre-roll: 직전 프레임을 먼저 흘려 첫 음절 잘림 방지.
                         if let pre = prevFrame {
+                            logger.info("발화 시작(speech onset) — pre-roll 프레임 flush(\(pre.count, privacy: .public) samples)")
                             onSpeechChunk(pre)
+                        } else {
+                            logger.info("발화 시작(speech onset) — pre-roll 없음")
                         }
                     }
                 case .speechEnd:
                     if speaking {
                         speaking = false
+                        logger.info("발화 종료(speech offset)")
                         onSpeechStateChange(false)
                     }
                 }
@@ -232,6 +241,11 @@ actor VADGate {
 
             // 발화중이면 현재 프레임 forward(speechStart 프레임 포함).
             if speaking {
+                // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): 발화 프레임 통과.
+                forwardFrameCount += 1
+                if forwardFrameCount == 1 || forwardFrameCount % 50 == 0 {
+                    logger.debug("발화 프레임 통과: 누적 \(self.forwardFrameCount, privacy: .public)프레임")
+                }
                 onSpeechChunk(frame)
             }
         } catch {

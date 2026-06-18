@@ -21,15 +21,25 @@ struct SubtitleOverlayView: View {
         // @Observable이므로 settings 값을 읽는 즉시 실시간 반영된다.
         let style = SubtitleStyle(settings: settings)
 
-        VStack {
-            if verticalPosition != .top { Spacer(minLength: 0) }
-            subtitleBox(translation: translation, source: source, style: style)
-                .opacity(visible ? 1 : 0)
-                .animation(.easeInOut(duration: 0.25), value: visible)
-                .animation(.easeInOut(duration: 0.25), value: translation)
-            if verticalPosition != .bottom { Spacer(minLength: 0) }
+        // GeometryReader로 화면 폭을 읽어 자막 박스의 최대 폭을 제한한다.
+        // 박스가 전체 폭으로 퍼지면 긴 번역(예: 84자)이 한 줄로 나와 lineLimit이
+        // 적용되지 않으므로, 박스를 화면 폭의 70%(최소 400pt)로 제한해 텍스트가
+        // 자연스럽게 여러 줄로 줄바꿈되어 lineLimit(maxLines)까지 표시되게 한다.
+        GeometryReader { geo in
+            // 박스 최대 폭: 화면 폭의 70%, 단 너무 좁아지지 않도록 400pt 하한.
+            let maxBoxWidth = max(400, geo.size.width * 0.7)
+            VStack {
+                if verticalPosition != .top { Spacer(minLength: 0) }
+                subtitleBox(translation: translation, source: source, style: style, maxBoxWidth: maxBoxWidth)
+                    .opacity(visible ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.25), value: visible)
+                    .animation(.easeInOut(duration: 0.25), value: translation)
+                if verticalPosition != .bottom { Spacer(minLength: 0) }
+            }
+            // 바깥 컨테이너는 화면 전체를 채우고 가로 중앙 정렬 — 박스만 maxBoxWidth로
+            // 제한되어 화면 중앙(또는 정렬)에 위치한다.
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 화면 가장자리 여백.
         .padding(.horizontal, 60)
         .padding(.vertical, 48)
@@ -38,7 +48,7 @@ struct SubtitleOverlayView: View {
     }
 
     @ViewBuilder
-    private func subtitleBox(translation: String, source: String, style: SubtitleStyle) -> some View {
+    private func subtitleBox(translation: String, source: String, style: SubtitleStyle, maxBoxWidth: CGFloat) -> some View {
         VStack(alignment: style.align.frameAlignment.horizontal, spacing: 6) {
             StyledSubtitleText(text: translation, size: style.fontSize, style: style)
             if settings.showSourceText, !source.isEmpty {
@@ -46,7 +56,8 @@ struct SubtitleOverlayView: View {
                     .opacity(0.85)
             }
         }
-        .frame(maxWidth: .infinity, alignment: style.align.frameAlignment)
+        // 박스 폭을 maxBoxWidth로 제한 → 긴 텍스트가 이 폭 안에서 줄바꿈된다.
+        .frame(maxWidth: maxBoxWidth, alignment: style.align.frameAlignment)
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(backgroundBox(style: style))
