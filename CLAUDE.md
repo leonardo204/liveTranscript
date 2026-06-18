@@ -45,10 +45,19 @@
 
 > 프로젝트 스펙은 `specs/`에 작성하고, 하니스 문서(`claude/`)는 건드리지 마세요.
 
+### 프로젝트 스펙 (specs/)
+
+- [001 설계](specs/001-liveTranslate-design.md) — 전체 설계/마일스톤/비용 계획
+- [002 Gemini Live & 오디오](specs/002-gemini-live-translate-and-audio.md) — Live Translate 사용법 + 피드백 루프 재발 방지
+- [릴리스 가이드](ref-docs/claude/release-guide.md) — Sparkle 배포/공증/appcast 절차
+
 ### 핵심 규칙
 
-- (프로젝트 고유의 코딩 규칙, 금지 사항 등)
+- `translationConfig`는 **`generationConfig` 내부**에 둔다(top-level은 close 1007 거부) → [002](specs/002-gemini-live-translate-and-audio.md)
+- systemTap은 **자기 프로세스를 탭에서 제외**한다(번역 음성 재생 시 피드백 루프 방지, 커밋 4eb9215)
+- Live Translate는 **연속 생성** — `turnComplete` 비신뢰 → delta 누적에 dedup/무음폴백/길이분절 방어 필수
+- 릴리스/자동 업데이트는 **Sparkle**로 처리한다([release-guide](ref-docs/claude/release-guide.md))
 
 ---
 
-*최종 업데이트: YYYY-MM-DD*
+*최종 업데이트: 2026-06-18*
