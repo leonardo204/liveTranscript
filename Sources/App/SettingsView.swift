@@ -1,11 +1,49 @@
 import SwiftUI
 
-/// 설정 창 내용 (M1.5 피드백 #2).
+/// 설정 창 내용 (M1.5 피드백 #2, M5에서 사이드바 레이아웃으로 재구성).
 ///
-/// 섹션: 입력 / 음성 감지(VAD) / 모니터(HUD) / 권한 / API 키 / 자막 스타일(M4 placeholder).
-/// 모든 변경은 기존 `AudioInputManager`/`SettingsStore`/`HUDController`에 즉시 반영된다.
+/// 항목이 늘어나며 상단 TabView(8탭)가 폭을 초과해 오버플로 메뉴가 생겼다.
+/// Xcode/시스템 설정 방식의 사이드바 레이아웃(`NavigationSplitView`)으로 전환한다:
+/// 왼쪽 사이드바에서 8개 카테고리(입력 / 자막 / 오디오 / 제어 HUD / 비용 / 권한 / API 키 / 일반)를
+/// 선택하면 오른쪽 detail에 해당 콘텐츠가 표시된다.
+/// 각 카테고리 콘텐츠는 기존 grouped Form 계산 프로퍼티를 그대로 재사용한다.
+/// 모든 변경은 기존 `AudioInputManager`/`SettingsStore`/`HUDController` 및
+/// `AppState.applyAudioOutputPolicy()`에 즉시 반영된다.
 struct SettingsView: View {
     var appState: AppState
+
+    /// 설정 카테고리(사이드바 항목 = detail 콘텐츠). 라벨/아이콘을 함께 정의한다.
+    private enum SettingsCategory: String, CaseIterable, Identifiable {
+        case input, subtitle, audio, monitor, cost, permission, apiKey, general
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .input: "입력"
+            case .subtitle: "자막"
+            case .audio: "오디오"
+            case .monitor: "제어 HUD"
+            case .cost: "비용"
+            case .permission: "권한"
+            case .apiKey: "API 키"
+            case .general: "일반"
+            }
+        }
+        var systemImage: String {
+            switch self {
+            case .input: "mic"
+            case .subtitle: "captions.bubble"
+            case .audio: "speaker.wave.2"
+            case .monitor: "macwindow"
+            case .cost: "dollarsign.circle"
+            case .permission: "lock.shield"
+            case .apiKey: "key"
+            case .general: "gearshape"
+            }
+        }
+    }
+
+    // 사이드바에서 선택된 카테고리(Optional 바인딩 — List selection 요구사항).
+    @State private var selection: SettingsCategory? = .input
 
     // 권한 상태는 창이 뜰 때/새로고침 시 다시 조회한다(시스템 설정에서 바꾸고 돌아올 수 있음).
     @State private var micStatus: PermissionHelper.Status = .unknown
@@ -19,23 +57,108 @@ struct SettingsView: View {
     // 저장/삭제 실패 등 사용자에게 보여줄 일시 메시지(키 비포함).
     @State private var apiKeyMessage: String?
 
+    // 설정 초기화 확인 다이얼로그 표시 여부(일반 탭).
+    @State private var showResetConfirm = false
+
     var body: some View {
-        Form {
-            inputSection
-            vadSection
-            subtitlePositionSection
-            monitorSection
-            costSection
-            permissionSection
-            apiKeySection
-            subtitleStyleSection
+        NavigationSplitView {
+            // 사이드바: 8개 카테고리 목록. selection은 Optional 바인딩.
+            List(SettingsCategory.allCases, selection: $selection) { category in
+                Label(category.label, systemImage: category.systemImage)
+                    .tag(category)
+            }
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 220)
+            .listStyle(.sidebar)
+            // 자동으로 추가되는 사이드바 토글 버튼 제거(사이드바는 항상 표시 — 타이틀바 단순화).
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            // detail: 선택된 카테고리의 콘텐츠(기존 grouped Form 재사용).
+            // 선택이 없으면 입력으로 폴백한다.
+            let category = selection ?? .input
+            // 타이틀바에 카테고리명을 띄우지 않는다(사이드바 선택으로 충분 — 타이틀바 단순화).
+            detailView(for: category)
         }
-        .formStyle(.grouped)
-        .frame(width: 460, height: 620)
+        .navigationSplitViewStyle(.balanced)
+        .frame(width: 760, height: 580)
         .onAppear {
             refreshPermissions()
             refreshScreens()
         }
+    }
+
+    /// 카테고리별 detail 콘텐츠 매핑. 콘텐츠는 모두 기존 grouped Form 계산 프로퍼티.
+    @ViewBuilder
+    private func detailView(for category: SettingsCategory) -> some View {
+        switch category {
+        case .input: inputTab
+        case .subtitle: subtitleTab
+        case .audio: audioTab
+        case .monitor: monitorTab
+        case .cost: costTab
+        case .permission: permissionTab
+        case .apiKey: apiKeyTab
+        case .general: generalTab
+        }
+    }
+
+    // MARK: - 카테고리 콘텐츠 (각 콘텐츠는 자체 grouped Form)
+
+    private var inputTab: some View {
+        Form {
+            inputSection
+            vadSection
+        }
+        .formStyle(.grouped)
+    }
+
+    private var subtitleTab: some View {
+        Form {
+            subtitlePositionSection
+            subtitleStyleSection
+        }
+        .formStyle(.grouped)
+    }
+
+    private var audioTab: some View {
+        Form {
+            audioSection
+        }
+        .formStyle(.grouped)
+    }
+
+    private var monitorTab: some View {
+        Form {
+            monitorSection
+        }
+        .formStyle(.grouped)
+    }
+
+    private var costTab: some View {
+        Form {
+            costSection
+        }
+        .formStyle(.grouped)
+    }
+
+    private var permissionTab: some View {
+        Form {
+            permissionSection
+        }
+        .formStyle(.grouped)
+    }
+
+    private var apiKeyTab: some View {
+        Form {
+            apiKeySection
+        }
+        .formStyle(.grouped)
+    }
+
+    private var generalTab: some View {
+        Form {
+            generalSection
+        }
+        .formStyle(.grouped)
     }
 
     // MARK: - 입력
@@ -126,13 +249,17 @@ struct SettingsView: View {
             HStack {
                 Button("화면 목록 새로고침") { refreshScreens() }
                 Spacer()
-                Button(appState.subtitleOverlay.isVisible ? "자막 숨김" : "자막 표시") {
-                    if appState.subtitleOverlay.isVisible {
-                        appState.subtitleOverlay.hide()
-                    } else {
-                        appState.subtitleOverlay.show()
-                    }
-                }
+                // 캡처 중 자막은 기본 표시되므로 토글 대신, 현재 스타일/위치를 실제
+                // 오버레이에 샘플 자막으로 띄워 화면에서 바로 확인한다(2초 후 페이드).
+                // 번역 중에는 실자막을 덮어쓰지 않도록 비활성화한다.
+                Button("테스트 자막 표시") { appState.showTestSubtitle() }
+                    .disabled(appState.isRunning)
+            }
+
+            if appState.isRunning {
+                Text("번역 정지 상태에서만 미리볼 수 있습니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -186,6 +313,93 @@ struct SettingsView: View {
     /// USD 금액 포맷($0.0000, 소수 4자리).
     private func usd(_ value: Double) -> String {
         String(format: "$%.4f", value)
+    }
+
+    // MARK: - 오디오
+
+    /// 오디오 설정용 양방향 바인딩 헬퍼. set 시 즉시 `applyAudioOutputPolicy()`를
+    /// 호출해 재생/덕킹 정책을 실시간으로 반영한다.
+    private func audioBinding<Value>(
+        _ keyPath: ReferenceWritableKeyPath<SettingsStore, Value>
+    ) -> Binding<Value> {
+        let settings = appState.settings
+        return Binding(
+            get: { settings[keyPath: keyPath] },
+            set: {
+                settings[keyPath: keyPath] = $0
+                appState.applyAudioOutputPolicy()
+            }
+        )
+    }
+
+    private var audioSection: some View {
+        let settings = appState.settings
+        return Group {
+            Section("번역 오디오") {
+                Toggle("번역 오디오 재생", isOn: audioBinding(\.translatedAudioPlaybackEnabled))
+
+                VStack(alignment: .leading) {
+                    Slider(
+                        value: audioBinding(\.translatedAudioVolume),
+                        in: 0...1
+                    ) {
+                        Text("번역 볼륨")
+                    }
+                    .disabled(!settings.translatedAudioPlaybackEnabled)
+                    LabeledContent("번역 볼륨", value: "\(Int(settings.translatedAudioVolume * 100))%")
+                }
+            }
+
+            Section("원문(시스템) 오디오") {
+                Toggle("원문 볼륨 덕킹", isOn: audioBinding(\.originalAudioDuckingEnabled))
+                    .disabled(!settings.translatedAudioPlaybackEnabled)
+
+                VStack(alignment: .leading) {
+                    Slider(
+                        value: audioBinding(\.originalAudioDuckVolume),
+                        in: 0...1
+                    ) {
+                        Text("원문 볼륨")
+                    }
+                    .disabled(!settings.translatedAudioPlaybackEnabled || !settings.originalAudioDuckingEnabled)
+                    LabeledContent("원문 볼륨", value: "\(Int(settings.originalAudioDuckVolume * 100))%")
+                }
+
+                Text("번역 오디오도 같은 출력 장치로 나가므로 원문 볼륨을 낮추면 번역 소리도 함께 작아집니다. 0%로 두면 번역도 들리지 않습니다. (macOS는 앱별 볼륨 제어를 지원하지 않습니다.)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - 일반 (설정 초기화)
+
+    private var generalSection: some View {
+        Section("설정 초기화") {
+            Button("설정 초기화", role: .destructive) { showResetConfirm = true }
+            Text("입력/자막/스타일/제어 HUD/오디오/비용 누적/위치 등 모든 설정이 기본값으로 되돌아갑니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .confirmationDialog(
+            "모든 설정을 초기 상태로 되돌릴까요?",
+            isPresented: $showResetConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("설정만 초기화") { appState.resetSettings(includingAPIKey: false); afterReset() }
+            Button("설정 + API 키 삭제", role: .destructive) { appState.resetSettings(includingAPIKey: true); afterReset() }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("API 키도 함께 삭제할지 선택하세요. ‘설정만 초기화’는 저장된 API 키를 유지합니다.")
+        }
+    }
+
+    /// 설정 초기화 후 화면 상태를 동기화한다(입력 버퍼/메시지/권한/화면 목록).
+    private func afterReset() {
+        apiKeyInput = ""
+        apiKeyMessage = nil
+        refreshPermissions()
+        refreshScreens()
     }
 
     // MARK: - 권한

@@ -14,6 +14,16 @@ struct liveTranslateApp: App {
                 .environment(appState)
         }
         .menuBarExtraStyle(.menu)
+        // macOS 표준 "설정…"(⌘,) — 앱 메뉴의 기본 appSettings 항목을 커스텀 설정 창에 연결한다.
+        // (SwiftUI Settings 씬을 쓰지 않고 SettingsWindowController로 띄우는 구조 유지.)
+        // 앱이 활성(설정 창 등으로 .regular)일 때 ⌘,가 동작한다. 메뉴 드롭다운이 열린 경우는
+        // 아래 MenuBarContent의 "설정…" 버튼 단축키가 처리한다(종료 ⌘Q와 동일 모델).
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("설정…") { appState.openSettings() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
+        }
     }
 }
 
@@ -45,6 +55,7 @@ private struct MenuBarContent: View {
         Button("설정…") {
             appState.openSettings()
         }
+        .keyboardShortcut(",", modifiers: .command)
 
         Divider()
 

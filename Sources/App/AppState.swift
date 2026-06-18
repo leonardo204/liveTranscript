@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import Security
@@ -36,6 +37,13 @@ final class AppState {
     /// 비용 추정기 (M2b, 태스크 C). 세션/누적 비용을 추적해 HUD/설정에 노출.
     let cost: CostEstimator
 
+    /// 번역 출력 오디오 재생기(M3+). Gemini 출력 오디오(24kHz)를 스피커로 스트리밍.
+    let translatedAudioPlayer = TranslatedAudioPlayer()
+
+    /// 시스템 출력 덕킹(M3+). 번역 재생 중 원문(시스템) 소리를 낮춘다.
+    /// 주의: 번역 오디오도 같은 출력 장치로 나가므로 함께 작아진다(설계상 부분 덕킹).
+    let systemAudioDucker = SystemAudioDucker()
+
     // MARK: - Gemini 연동 (M2a)
 
     /// Gemini 연결/번역 상태 라벨(메뉴/HUD 표시용). 키는 절대 포함하지 않는다.
@@ -48,6 +56,10 @@ final class AppState {
     @ObservationIgnored private var gemini: GeminiLiveClient?
     /// 수신 이벤트 소비 Task.
     @ObservationIgnored private var eventTask: Task<Void, Never>?
+
+    /// 앱 정상 종료(Cmd-Q) 옵저버. 종료 시 덕킹된 시스템 볼륨을 복원하고 재생을 정지한다.
+    /// 한계: SIGKILL/강제 크래시 시에는 이 콜백이 호출되지 않아 덕킹이 복원되지 않을 수 있다.
+    @ObservationIgnored private var willTerminateObserver: NSObjectProtocol?
 
     /// 설정 창 컨트롤러 (M1.5). lazy: 실제 열 때 생성.
     /// `@Observable`과 `lazy`가 충돌하므로 관찰 대상에서 제외한다(UI가 추적할 필요 없음).
@@ -98,7 +110,24 @@ final class AppState {
         }
         // 제어 HUD가 시작/정지·설정 버튼을 호출할 수 있도록 배선(self 완성 후).
         self.hud.bind(appState: self)
+        // 정상 종료(Cmd-Q)에서도 덕킹이 남지 않도록 시스템 볼륨 복원 + 재생 정지를 보장한다.
+        // (SIGKILL/강제 크래시는 이 콜백이 호출되지 않아 복구 불가 — 위 옵저버 주석 참조.)
+        self.willTerminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // 알림은 메인 큐에서 오므로 MainActor 작업으로 안전하게 호핑.
+            Task { @MainActor in
+                guard let self else { return }
+                self.systemAudioDucker.restore()
+                self.translatedAudioPlayer.stop()
+            }
+        }
     }
+    // 옵저버 해제용 deinit은 두지 않는다: AppState는 앱 수명 동안 살아있는 단일 인스턴스이며,
+    // willTerminate 알림은 종료 시 1회만 발화한다(Swift 6에서 nonisolated deinit이 비-Sendable
+    // 옵저버에 접근할 수 없는 제약도 회피). 핸들은 향후 제거가 필요할 때를 위해 보관만 한다.
 
     // MARK: - API 키 관리 (설정 UI에서 호출)
 
@@ -218,6 +247,8 @@ final class AppState {
         // 권한 콜백 후 isCapturing이 true가 된다. UI는 isRunning(버튼 상태)과
         // audio.isCapturing(실제 캡처 표시)을 각각 관찰한다.
         subtitleOverlay.applyCapturePolicy(isCapturing: true)
+        // 번역 오디오 출력/덕킹 정책 적용(설정+실행상태 기준).
+        applyAudioOutputPolicy()
     }
 
     /// 번역 세션을 확실히 정지한다. audio + Gemini + 자막 오버레이 모두 내려간다.
@@ -227,6 +258,9 @@ final class AppState {
         audio.stop()
         stopGemini()
         subtitleOverlay.applyCapturePolicy(isCapturing: false)
+        // 번역 오디오 재생 정지 + 시스템 볼륨 복원.
+        translatedAudioPlayer.stop()
+        systemAudioDucker.restore()
     }
 
     // MARK: - Gemini 수명주기 (M2a)
@@ -246,6 +280,8 @@ final class AppState {
         self.gemini = client
         translating = true
         geminiStatus = "연결 중…"
+        // 번역 출력 오디오 재생 플래그를 전달(off면 client가 오디오 디코드도 생략 — 비용 0).
+        Task { await client.setPlaybackEnabled(settings.translatedAudioPlaybackEnabled) }
 
         // 오디오 스레드의 발화 청크를 actor로 hop해 송신한다.
         // onChunk는 @Sendable — client는 actor라 안전하게 캡처 가능.
@@ -301,8 +337,14 @@ final class AppState {
             cost.addSentAudio(sampleCount: sampleCount)   // 입력 비용 누적(태스크 C).
         case .outputTokens(let tokens):
             cost.addOutputTokens(tokens)                  // 출력 비용 누적(태스크 C).
+        case .outputAudio(let data):
+            translatedAudioPlayer.enqueue(int16LE: data)  // 번역 출력 오디오 재생(M3+).
         case .info(let message):
             geminiStatus = message
+        case .permanentFailure(let reason):
+            // 영구 실패 → 세션을 확실히 정리(오디오 재생 정지 + 시스템 볼륨 복원 + isRunning=false).
+            stopSession()
+            geminiStatus = reason   // stopSession이 "연결 안 됨"으로 덮으므로 사유를 다시 노출
         }
     }
 
@@ -320,6 +362,63 @@ final class AppState {
     /// 설정 창을 연다 (메뉴 "설정…").
     func openSettings() {
         settingsWindow.show()
+    }
+
+    // MARK: - 번역 오디오 출력/덕킹 (M3+)
+
+    /// 현재 설정 + 실행 상태를 플레이어/덕커/클라이언트에 반영한다.
+    /// UI가 설정(재생 토글/볼륨/덕킹)을 바꿀 때도 호출해 실시간 반영한다.
+    ///
+    /// 주의(설계상 부분 덕킹): 번역 오디오도 시스템 기본 출력 장치로 나가므로,
+    /// 덕킹을 켜면 원문과 함께 번역 소리도 같이 작아진다(별도 출력 라우팅은 미지원).
+    func applyAudioOutputPolicy() {
+        let live = gemini   // 살아있는 client(actor) 참조
+
+        if settings.translatedAudioPlaybackEnabled, isRunning {
+            translatedAudioPlayer.volume = Float(settings.translatedAudioVolume)
+            translatedAudioPlayer.start()
+            if let live { Task { await live.setPlaybackEnabled(true) } }
+            // 덕킹: on이면 원문(과 번역) 출력을 함께 낮춘다, off면 복원.
+            if settings.originalAudioDuckingEnabled {
+                systemAudioDucker.duck(to: Float(settings.originalAudioDuckVolume))
+            } else {
+                systemAudioDucker.restore()
+            }
+        } else {
+            // 재생 off거나 정지 상태: 재생 중지 + 볼륨 복원 + client 디코드 중단.
+            translatedAudioPlayer.stop()
+            systemAudioDucker.restore()
+            if let live { Task { await live.setPlaybackEnabled(false) } }
+        }
+    }
+
+    // MARK: - 미리보기/리셋 (설정 UI)
+
+    /// 자막 오버레이를 강제로 표시하고 샘플 자막을 주입해 실제 화면 렌더를 미리본다.
+    func showTestSubtitle() {
+        // 캡처/번역 중에는 실제 자막을 덮어쓰지 않도록 미리보기를 막는다(실자막 보존).
+        guard !isRunning else { return }
+        subtitleOverlay.show()
+        subtitles.reset()
+        subtitles.ingestTranslationDelta("안녕하세요 — 자막 미리보기입니다")
+        if settings.showSourceText {
+            subtitles.ingestSourceDelta("Hello — this is a subtitle preview")
+        }
+        subtitles.ingestTurnComplete()  // 2초 유지 후 자동 페이드
+    }
+
+    /// 모든 사용자 설정을 기본값으로 되돌리고 시각/오디오 정책을 재적용한다.
+    /// `includingAPIKey`가 true면 Keychain의 키도 삭제한다(SettingsStore.resetAll은 키를 건드리지 않음).
+    /// 한계: 입력 소스 선택 초기화는 영속값만 되돌리며, 실제 입력 hot-swap은 다음 번역 시작 시 반영된다.
+    func resetSettings(includingAPIKey: Bool) {
+        settings.resetAll()
+        hud.applyEnabledPolicy()
+        subtitleOverlay.applyPositionChange()
+        applyAudioOutputPolicy()
+        if includingAPIKey {
+            clearAPIKey()
+        }
+        refreshKeyState()
     }
 
     /// 필요 시점에 키를 조회한다 (메모리 상주 최소화를 위해 캐싱하지 않음).

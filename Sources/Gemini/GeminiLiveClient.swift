@@ -50,8 +50,14 @@ actor GeminiLiveClient {
         case sentAudio(sampleCount: Int)
         /// usageMetadata가 보고한 출력 오디오 토큰 수(비용 출력 추정용, 태스크 C).
         case outputTokens(Int)
+        /// 번역 출력 오디오 청크(24kHz mono Int16 LE PCM). 재생 플래그가 켜진 경우에만 방출된다.
+        case outputAudio(Data)
         /// 정보성 알림(연결됨/재연결 등) — HUD/로그용. 키는 절대 포함하지 않는다.
         case info(String)
+        /// 영구 실패(재연결 포기) — 세션 수명 종료 신호. 소비자는 이를 받으면 오디오 재생 정지/
+        /// 시스템 볼륨 복원 등 세션 정리를 수행해야 한다. `.state(.error)`는 일시 끊김에도
+        /// 쓰이므로 영구 실패는 이 별도 이벤트로 명확히 구분한다. 키는 절대 포함하지 않는다.
+        case permanentFailure(reason: String)
     }
 
     // MARK: - 설정
@@ -85,6 +91,12 @@ actor GeminiLiveClient {
 
     /// 사용자가 stop()을 호출했는지 — true면 재연결하지 않는다.
     private var stopped = true
+
+    /// 번역 출력 오디오 재생 여부. false면 modelTurn 오디오를 디코드/방출하지 않고 폐기(비용 0).
+    private var playbackEnabled = false
+
+    /// 번역 출력 오디오 재생 플래그를 갱신한다(AppState가 설정 변경/시작 시 호출).
+    func setPlaybackEnabled(_ on: Bool) { playbackEnabled = on }
 
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
@@ -318,7 +330,18 @@ actor GeminiLiveClient {
             if let inp = content.inputTranscription?.text, !inp.isEmpty {
                 emit(.source(delta: inp))
             }
-            // modelTurn의 inlineData(출력 오디오 24kHz)는 자막 전용 앱이므로 폐기(디코드/재생 안 함).
+            // modelTurn의 inlineData(출력 오디오 24kHz mono Int16 LE PCM).
+            // 재생 플래그가 켜진 경우에만 디코드해 .outputAudio로 방출한다.
+            // playbackEnabled=false면 자막 전용 앱이므로 디코드도 생략해 폐기(비용 0).
+            if playbackEnabled, let parts = content.modelTurn?.parts {
+                for part in parts {
+                    guard let inline = part.inlineData,
+                          let mime = inline.mimeType, mime.contains("audio/pcm"),
+                          let b64 = inline.data, !b64.isEmpty,
+                          let decoded = Data(base64Encoded: b64), !decoded.isEmpty else { continue }
+                    emit(.outputAudio(decoded))
+                }
+            }
             // 턴 종료는 별도 .turnComplete 이벤트로 명시 전달 — 빈 문자열 emit 같은 혼란을 없앤다.
             if content.turnComplete == true {
                 emit(.turnComplete)
@@ -416,6 +439,9 @@ actor GeminiLiveClient {
         log.error("영구 실패 — 재연결 중단: \(message, privacy: .public)")
         state = .error(message)
         emit(.info(message))
+        // 상태 표시는 유지하되, 세션 수명 종료를 별도 신호로 보내 소비자가 오디오 재생 정지/
+        // 시스템 볼륨 복원 등 정리를 수행하도록 한다(일시 끊김 .state(.error)와 구분).
+        emit(.permanentFailure(reason: message))
     }
 
     /// 연결 끊김 처리.

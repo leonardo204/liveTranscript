@@ -71,6 +71,19 @@ final class SettingsStore {
         static let subtitleBackgroundOpacity = "subtitle.style.bgOpacity"
         static let subtitleTextAlign = "subtitle.style.align"
         static let subtitleMaxLines = "subtitle.style.maxLines"
+        // 번역 오디오 출력/덕킹 (M3+)
+        static let translatedAudioPlaybackEnabled = "audio.playback.enabled"
+        static let translatedAudioVolume = "audio.playback.volume"
+        static let originalAudioDuckingEnabled = "audio.duck.enabled"
+        static let originalAudioDuckVolume = "audio.duck.volume"
+    }
+
+    /// 번역 오디오 출력/덕킹 기본값(리셋 시에도 동일 사용). 결정적 상수만.
+    private enum AudioDefault {
+        static let playbackEnabled = false
+        static let volume = 1.0
+        static let duckingEnabled = true
+        static let duckVolume = 0.3
     }
 
     /// 자막 스타일 기본값(리셋 시에도 동일 사용). 결정적 상수만.
@@ -117,6 +130,11 @@ final class SettingsStore {
             Key.subtitleBackgroundOpacity: StyleDefault.backgroundOpacity,
             Key.subtitleTextAlign: StyleDefault.align.rawValue,
             Key.subtitleMaxLines: StyleDefault.maxLines,
+            // 번역 오디오 출력/덕킹(M3+). Double 기본값은 register로 처리해 0 충돌 방지.
+            Key.translatedAudioPlaybackEnabled: AudioDefault.playbackEnabled,
+            Key.translatedAudioVolume: AudioDefault.volume,
+            Key.originalAudioDuckingEnabled: AudioDefault.duckingEnabled,
+            Key.originalAudioDuckVolume: AudioDefault.duckVolume,
         ])
         self.monitorEnabled = defaults.bool(forKey: Key.monitorEnabled)
         self.monitorAutoShowOnCapture = defaults.bool(forKey: Key.monitorAutoShowOnCapture)
@@ -153,6 +171,11 @@ final class SettingsStore {
             SubtitleTextAlign(rawValue: defaults.string(forKey: Key.subtitleTextAlign) ?? "")
             ?? StyleDefault.align
         self.subtitleMaxLines = defaults.integer(forKey: Key.subtitleMaxLines)
+        // 번역 오디오 출력/덕킹 복원(M3+). Double은 register 기본값 덕분에 0 충돌 없음.
+        self.translatedAudioPlaybackEnabled = defaults.bool(forKey: Key.translatedAudioPlaybackEnabled)
+        self.translatedAudioVolume = defaults.double(forKey: Key.translatedAudioVolume)
+        self.originalAudioDuckingEnabled = defaults.bool(forKey: Key.originalAudioDuckingEnabled)
+        self.originalAudioDuckVolume = defaults.double(forKey: Key.originalAudioDuckVolume)
     }
 
     // MARK: - 입력 소스 영속화 (태스크 A)
@@ -357,6 +380,30 @@ final class SettingsStore {
         subtitleMaxLines = StyleDefault.maxLines
     }
 
+    // MARK: - 번역 오디오 출력/덕킹 (M3+)
+
+    /// 번역 결과 오디오(Gemini 출력)를 스피커로 재생할지(기본 off — 자막 전용).
+    /// on이면 AppState가 TranslatedAudioPlayer를 켜고 GeminiLiveClient에 재생 플래그를 전달한다.
+    var translatedAudioPlaybackEnabled: Bool {
+        didSet { defaults.set(translatedAudioPlaybackEnabled, forKey: Key.translatedAudioPlaybackEnabled) }
+    }
+
+    /// 번역 오디오 소프트웨어 재생 볼륨(0...1, 기본 1.0). 시스템 출력 볼륨과 별개.
+    var translatedAudioVolume: Double {
+        didSet { defaults.set(translatedAudioVolume, forKey: Key.translatedAudioVolume) }
+    }
+
+    /// 번역 재생 중 원문(시스템) 소리를 덕킹할지(기본 on).
+    /// 주의: 번역 오디오도 같은 출력 장치로 나가므로 함께 작아진다(설계상 부분 덕킹).
+    var originalAudioDuckingEnabled: Bool {
+        didSet { defaults.set(originalAudioDuckingEnabled, forKey: Key.originalAudioDuckingEnabled) }
+    }
+
+    /// 덕킹 시 낮출 목표 출력 볼륨(0...1, 기본 0.3).
+    var originalAudioDuckVolume: Double {
+        didSet { defaults.set(originalAudioDuckVolume, forKey: Key.originalAudioDuckVolume) }
+    }
+
     // MARK: - 번역 (M2a)
 
     /// 번역 대상 언어 코드(BCP-47, 기본 ko). GeminiLiveClient setup에 사용.
@@ -410,5 +457,58 @@ final class SettingsStore {
         defaults.removeObject(forKey: Key.monitorFrameX)
         defaults.removeObject(forKey: Key.monitorFrameY)
         defaults.set(false, forKey: Key.monitorHasSavedPosition)
+    }
+
+    // MARK: - 전체 리셋
+
+    /// 모든 사용자 설정을 초기 기본값으로 되돌린다(설정 "전체 초기화").
+    /// **주의: API 키(Keychain)는 건드리지 않는다 — 호출자가 별도로 처리한다.**
+    ///
+    /// 절차: (1) Key/StyleDefault/AudioDefault의 모든 영속 키를 removeObject로 제거하고,
+    /// (2) keyless/계산 프로퍼티(누적 비용·HUD 위치·입력 선택·자막 화면ID)도 초기화한 뒤,
+    /// (3) in-memory @Observable 프로퍼티들을 각자의 기본 상수로 재대입해 didSet이
+    /// register 기본값을 다시 쓰도록 한다. 한 곳에서 일관되게 처리한다.
+    func resetAll() {
+        // (1) 영속 키 제거 — 이후 in-memory 재대입의 didSet이 기본값을 다시 기록한다.
+        let allKeys = [
+            Key.monitorEnabled, Key.monitorAutoShowOnCapture, Key.monitorHideOnStop,
+            Key.monitorFrameX, Key.monitorFrameY, Key.monitorHasSavedPosition,
+            Key.targetLanguageCode, Key.showSourceText,
+            Key.inputSelectionKind, Key.inputSelectionDeviceUID,
+            Key.subtitleMaxCharsBeforeBreak,
+            Key.costHUDEnabled, Key.costCumulativeInputUSD, Key.costCumulativeOutputUSD,
+            Key.subtitleScreenID, Key.subtitleVerticalPosition, Key.subtitleAutoShowOnCapture,
+            Key.subtitleFontName, Key.subtitleFontSize, Key.subtitleFontWeight,
+            Key.subtitleTextColor, Key.subtitleStrokeEnabled, Key.subtitleStrokeColor,
+            Key.subtitleGlowEnabled, Key.subtitleGlowColor, Key.subtitleGlowRadius,
+            Key.subtitleBackgroundEnabled, Key.subtitleBackgroundOpacity,
+            Key.subtitleTextAlign, Key.subtitleMaxLines,
+            Key.translatedAudioPlaybackEnabled, Key.translatedAudioVolume,
+            Key.originalAudioDuckingEnabled, Key.originalAudioDuckVolume,
+        ]
+        for key in allKeys { defaults.removeObject(forKey: key) }
+
+        // (2) keyless/별도 항목 초기화.
+        resetCumulativeCost()      // 누적 비용 0
+        resetMonitorPosition()     // HUD 저장 위치 제거
+        subtitleScreenID = nil     // 자막 화면 선택 해제(주 화면 폴백)
+
+        // (3) in-memory @Observable 재대입 → didSet이 기본값을 영속화한다.
+        monitorEnabled = true
+        monitorAutoShowOnCapture = true
+        monitorHideOnStop = true
+        targetLanguageCode = AppConfig.defaultTargetLanguageCode
+        showSourceText = false
+        subtitleMaxCharsBeforeBreak = AppConfig.defaultMaxCharsBeforeBreak
+        costHUDEnabled = true
+        subtitleVerticalPosition = .bottom
+        subtitleAutoShowOnCapture = true
+        // 자막 스타일은 기존 전용 리셋 경로를 재사용(색 hex 3개 포함).
+        resetSubtitleStyle()
+        // 번역 오디오 출력/덕킹.
+        translatedAudioPlaybackEnabled = AudioDefault.playbackEnabled
+        translatedAudioVolume = AudioDefault.volume
+        originalAudioDuckingEnabled = AudioDefault.duckingEnabled
+        originalAudioDuckVolume = AudioDefault.duckVolume
     }
 }

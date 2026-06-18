@@ -8,8 +8,9 @@ import SwiftUI
 /// 되돌려 Dock 아이콘이 상시 노출되지 않게 한다.
 ///
 /// SwiftUI `Settings` scene을 쓰지 않고 별도 `NSWindow`로 구현한 이유: `Settings` scene은
-/// `MenuBarExtra`-only 앱에서 표준 "환경설정" 메뉴(⌘,)에 의존해 트리거가 불안정하고,
-/// 우리는 메뉴 버튼/HUD/권한 안내 등 여러 진입점에서 결정적으로 띄워야 하기 때문.
+/// `MenuBarExtra`-only 앱에서 동작이 불안정하고, 우리는 메뉴 버튼/HUD/권한 안내 등 여러
+/// 진입점에서 결정적으로 띄워야 하기 때문. 표준 ⌘, 단축키는 앱 메뉴의 `appSettings`
+/// CommandGroup(liveTranslateApp)을 이 컨트롤러의 `show()`에 연결해 제공한다.
 @MainActor
 final class SettingsWindowController: NSObject, NSWindowDelegate {
 
