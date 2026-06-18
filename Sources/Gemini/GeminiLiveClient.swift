@@ -29,13 +29,26 @@ actor GeminiLiveClient {
     }
 
     /// 외부로 방출되는 이벤트.
+    ///
+    /// 자막 누적 모델(M3): Live API는 outputTranscription/inputTranscription을
+    /// **증분(delta) 조각**으로 스트리밍한다. 클라이언트는 이를 **그대로 delta로 방출**하고
+    /// (절대 누적/치환하지 않는다), 턴(발화) 종료는 `serverContent.turnComplete`로
+    /// 별도 `.turnComplete` 이벤트를 통해 명시적으로 알린다. 따라서 소비자(SubtitleEngine)는
+    /// "delta append(이어붙임)"와 "턴 확정"을 명확히 구분할 수 있다.
     enum Event: Sendable {
         /// 연결 상태 변화.
         case state(State)
-        /// 번역 자막(부분/확정). `isFinal`은 turnComplete로 확정된 줄.
-        case translation(text: String, isFinal: Bool)
-        /// 원문 전사(부분/확정). 원문 동시 표시 토글용(FR-8).
-        case source(text: String, isFinal: Bool)
+        /// 번역 자막 **delta 조각**. 소비자가 현재 버퍼에 append해야 완전한 문장이 된다.
+        case translation(delta: String)
+        /// 원문 전사 **delta 조각**. 원문 동시 표시 토글용(FR-8).
+        case source(delta: String)
+        /// 턴(발화) 종료 신호(`serverContent.turnComplete: true`).
+        /// 소비자는 현재 누적 버퍼를 확정 줄로 고정하고 표시 시간 후 페이드아웃한다.
+        case turnComplete
+        /// 송신한 오디오 청크의 샘플 수(비용 입력 추정용, 태스크 C). 16kHz mono 기준.
+        case sentAudio(sampleCount: Int)
+        /// usageMetadata가 보고한 출력 오디오 토큰 수(비용 출력 추정용, 태스크 C).
+        case outputTokens(Int)
         /// 정보성 알림(연결됨/재연결 등) — HUD/로그용. 키는 절대 포함하지 않는다.
         case info(String)
     }
@@ -91,6 +104,10 @@ actor GeminiLiveClient {
 
     private let log = Logger(subsystem: AppConfig.bundleIdentifier, category: "GeminiLive")
 
+    /// sessionResumptionUpdate 수신 카운터 — 로그 폭주 방지(빈도 제한, M3 부수 정리).
+    /// 매 수신마다 찍지 않고 N회마다 한 번만 debug 로그를 남긴다.
+    private var resumptionUpdateCount = 0
+
     // MARK: - 초기화
 
     /// - Parameters:
@@ -134,6 +151,8 @@ actor GeminiLiveClient {
     /// ready 상태에서만 송신하며, 그 외에는 조용히 폐기한다(연결 전/재연결 중 청크 유실 허용 — M2a).
     func sendAudio(_ chunk: [Float]) {
         guard state == .ready, let task else { return }
+        // 비용 입력 추정(태스크 C): 실제 송신하는 청크의 샘플 수를 방출한다(정확한 누적 시간 근거).
+        emit(.sentAudio(sampleCount: chunk.count))
         let pcm = Self.floatToInt16LEData(chunk)
         let base64 = pcm.base64EncodedString()
         let message = RealtimeInputMessage(
@@ -272,22 +291,26 @@ actor GeminiLiveClient {
         }
 
         if let content = msg.serverContent {
-            let isFinal = content.turnComplete ?? false
+            // 번역/원문 텍스트는 **delta 조각** 그대로 방출한다(누적/치환하지 않음).
+            // 빈 조각은 무시 — 소비자 방어 부담을 줄인다.
             if let out = content.outputTranscription?.text, !out.isEmpty {
-                emit(.translation(text: out, isFinal: isFinal))
+                emit(.translation(delta: out))
             }
             if let inp = content.inputTranscription?.text, !inp.isEmpty {
-                emit(.source(text: inp, isFinal: isFinal))
+                emit(.source(delta: inp))
             }
             // modelTurn의 inlineData(출력 오디오 24kHz)는 자막 전용 앱이므로 폐기(디코드/재생 안 함).
-            // turnComplete만 별도로 알려 부분 텍스트 확정 처리를 돕는다.
-            if isFinal {
-                emit(.translation(text: "", isFinal: true))
+            // 턴 종료는 별도 .turnComplete 이벤트로 명시 전달 — 빈 문자열 emit 같은 혼란을 없앤다.
+            if content.turnComplete == true {
+                emit(.turnComplete)
             }
         }
 
-        // usageMetadata: M2b(비용 추정)에서 사용 — 지금은 파싱 자리만 두고 무시.
-        // _ = msg.usageMetadata
+        // usageMetadata: 출력 오디오 토큰을 추출해 비용 추정기로 방출(태스크 C).
+        // responseTokensDetails(AUDIO) 우선, 없으면 responseTokenCount 폴백.
+        if let usage = msg.usageMetadata, let outputTokens = usage.outputAudioTokens, outputTokens > 0 {
+            emit(.outputTokens(outputTokens))
+        }
 
         // goAway / sessionResumptionUpdate: M2c(무중단 재연결)에서 처리 — 지금은 로그만.
         if msg.goAway != nil {
@@ -295,7 +318,11 @@ actor GeminiLiveClient {
             emit(.info("세션 종료 예고 수신"))
         }
         if msg.sessionResumptionUpdate != nil {
-            log.debug("sessionResumptionUpdate 수신 (M2c에서 처리 예정)")
+            // 매우 자주 도착하므로 로그 폭주 방지: 50회마다 한 번만 debug 로그.
+            resumptionUpdateCount += 1
+            if resumptionUpdateCount % 50 == 1 {
+                log.debug("sessionResumptionUpdate 수신 (누적 \(self.resumptionUpdateCount)회, M2c에서 처리 예정)")
+            }
         }
     }
 
@@ -598,11 +625,34 @@ private struct ModelTurn: Decodable {
     let parts: [Part]?
 }
 
-/// M2b(비용 추정)에서 사용. 지금은 파싱 자리만.
+/// M2b(비용 추정, 태스크 C). 출력 오디오 토큰 추출용.
+///
+/// `responseTokensDetails`는 modality별 토큰 분해다(예: `[{modality:"AUDIO", tokenCount:N}]`).
+/// 출력 오디오 비용은 modality=="AUDIO"의 tokenCount를 우선 사용하고, 해당 분해가 없으면
+/// `responseTokenCount`로 폴백한다.
 private struct UsageMetadata: Decodable {
     let totalTokenCount: Int?
     let promptTokenCount: Int?
     let responseTokenCount: Int?
+    let responseTokensDetails: [ModalityTokenCount]?
+
+    struct ModalityTokenCount: Decodable {
+        let modality: String?
+        let tokenCount: Int?
+    }
+
+    /// 이 usageMetadata가 보고한 출력 오디오 토큰 수(없으면 nil).
+    /// AUDIO modality 우선, 없으면 responseTokenCount 폴백.
+    var outputAudioTokens: Int? {
+        if let details = responseTokensDetails {
+            let audio = details
+                .filter { $0.modality?.uppercased() == "AUDIO" }
+                .compactMap { $0.tokenCount }
+                .reduce(0, +)
+            if audio > 0 { return audio }
+        }
+        return responseTokenCount
+    }
 }
 
 /// M2c(무중단 재연결)에서 처리. 지금은 로그만.
