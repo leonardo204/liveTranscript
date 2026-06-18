@@ -415,7 +415,10 @@ final class AppState {
 
         let client = GeminiLiveClient(
             apiKey: apiKey,
-            targetLanguageCode: settings.targetLanguageCode
+            targetLanguageCode: settings.targetLanguageCode,
+            // 클라이언트 VAD 모드: VAD 사용 시 서버 VAD를 끄고 수동 activity 신호로 발화 경계를
+            // 지정한다(double-VAD 제거). 연결 시점의 audio.vadEnabled를 고정 전달한다.
+            clientVADEnabled: audio.vadEnabled
         )
         self.gemini = client
         translating = true
@@ -498,6 +501,12 @@ final class AppState {
         case .info(let message):
             log.info("event.info: \(message, privacy: .public)")
             geminiStatus = message
+        case .interrupted:
+            // 서버가 진행 중 응답을 인터럽트 → 진행 중 자막/번역 오디오를 즉시 정리한다.
+            // 끊긴 응답의 잔재(자막 누적/스케줄된 오디오)가 다음 발화에 섞이지 않도록 한다.
+            log.info("event.interrupted → 진행 중 자막/오디오 정리")
+            subtitles.reset()
+            translatedAudioPlayer.flush()
         case .permanentFailure(let reason):
             // 영구 실패 → 의도를 정지로 돌리고 reconciler에 정리를 맡긴다(직렬 안전).
             // reconciler가 performStop으로 player/ducker/audio/gemini를 한 번에 정리한다.

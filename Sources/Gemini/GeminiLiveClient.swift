@@ -58,6 +58,9 @@ actor GeminiLiveClient {
         /// 시스템 볼륨 복원 등 세션 정리를 수행해야 한다. `.state(.error)`는 일시 끊김에도
         /// 쓰이므로 영구 실패는 이 별도 이벤트로 명확히 구분한다. 키는 절대 포함하지 않는다.
         case permanentFailure(reason: String)
+        /// 서버가 진행 중 응답을 인터럽트(`serverContent.interrupted: true`). 소비자는 진행 중
+        /// 자막/번역 오디오를 즉시 정리해 끊긴 응답 잔재가 남지 않게 한다.
+        case interrupted
     }
 
     // MARK: - 설정
@@ -65,6 +68,13 @@ actor GeminiLiveClient {
     private let apiKey: String
     private let model: String
     private let targetLanguageCode: String
+
+    /// 클라이언트 VAD 모드 여부(double-VAD 제거 PoC).
+    /// - true: 서버 자동 VAD off(setup의 realtimeInputConfig.automaticActivityDetection.disabled=true)
+    ///   + 수동 activityStart/End 신호. 클라이언트 VAD가 발화 경계를 결정한다.
+    /// - false: 기존 동작 — 서버 VAD on(realtimeInputConfig 생략), activity 신호 없이 연속 전송.
+    /// AppState가 연결 시점의 `settings.vadEnabled`(audio.vadEnabled)를 전달한다.
+    private let clientVADEnabled: Bool
 
     /// 재연결 백오프(초). 끊길 때마다 증가, setupComplete 수신 시 리셋.
     private var reconnectDelay: TimeInterval = 1.0
@@ -164,6 +174,22 @@ actor GeminiLiveClient {
     /// 선제 재연결까지의 간격(초). 15분 한도보다 짧게 14분으로 잡아 여유를 둔다.
     private let proactiveReconnectInterval: TimeInterval = 14 * 60
 
+    // MARK: - 클라이언트 VAD activity 세그먼트(double-VAD 제거 PoC)
+    //
+    // clientVADEnabled일 때만 동작한다. 모든 activity 로직을 이 actor 내부에 두어
+    // cross-thread 순서 문제를 피한다:
+    // - activityStart: sendAudio 안에서, 세그먼트가 비활성이면 오디오 전송 직전에 보낸다
+    //   (같은 actor 메서드 → 송신 순서 자연 보장).
+    // - activityEnd: 무음 idle 타이머로 보낸다. sendAudio마다 타이머를 리셋하고,
+    //   일정 시간 오디오가 없으면 activityEnd 전송(end-of-speech 임계 ≥500ms 충족).
+
+    /// 현재 발화 세그먼트가 진행 중인지(activityStart 보냄 ~ activityEnd 보냄 사이).
+    private var activitySegmentActive = false
+    /// 무음 idle 타이머 Task. sendAudio마다 취소/재무장한다.
+    private var segmentIdleTask: Task<Void, Never>?
+    /// 무음 판정 임계(초). end-of-speech 권장(≥0.5s)을 충족하도록 0.6s.
+    private let segmentIdleSeconds: TimeInterval = 0.6
+
     // MARK: - 초기화
 
     /// - Parameters:
@@ -172,10 +198,12 @@ actor GeminiLiveClient {
     ///   - targetLanguageCode: 번역 대상 언어 BCP-47(기본 ko).
     init(apiKey: String,
          model: String = AppConfig.geminiModel,
-         targetLanguageCode: String = AppConfig.defaultTargetLanguageCode) {
+         targetLanguageCode: String = AppConfig.defaultTargetLanguageCode,
+         clientVADEnabled: Bool = false) {
         self.apiKey = apiKey
         self.model = model
         self.targetLanguageCode = targetLanguageCode
+        self.clientVADEnabled = clientVADEnabled
     }
 
     // MARK: - 연결 수명
@@ -197,6 +225,7 @@ actor GeminiLiveClient {
         generation += 1   // 이전 task의 지연 콜백 무효화
         proactiveReconnectTask?.cancel()   // 선제 재연결 타이머 정지(M2c)
         proactiveReconnectTask = nil
+        resetActivitySegment()   // 클라이언트 VAD 세그먼트/타이머 정리
         teardownSocket()
         state = .disconnected
         continuation?.finish()
@@ -215,6 +244,13 @@ actor GeminiLiveClient {
                 log.debug("sendAudio 드롭: 이유=state(\(Self.stateLabel(self.state), privacy: .public)) samples=\(chunk.count, privacy: .public) 누적드롭=\(self.sendAudioDropCount, privacy: .public)")
             }
             return
+        }
+        // 클라이언트 VAD 모드: 세그먼트가 비활성이면 오디오 전송 직전에 activityStart를 보낸다.
+        // 같은 actor 메서드 안에서 순차 전송하므로 activityStart → audio 순서가 자연 보장된다.
+        if clientVADEnabled, !activitySegmentActive {
+            sendActivityStart()
+            activitySegmentActive = true
+            log.debug("activityStart 전송(발화 세그먼트 시작)")
         }
         // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): state==ready라 송신.
         sendAudioCount += 1
@@ -235,6 +271,61 @@ actor GeminiLiveClient {
                 Task { await self?.handleSendError(error) }
             }
         }
+        // 클라이언트 VAD 모드: 송신마다 무음 idle 타이머를 재무장한다(오디오가 끊기면 activityEnd).
+        if clientVADEnabled { resetSegmentIdleTimer() }
+    }
+
+    // MARK: - 클라이언트 VAD activity 신호 (actor 내부 — 순서 보장)
+
+    /// 무음 idle 타이머를 재무장한다. sendAudio마다 호출되어, 마지막 오디오 이후
+    /// `segmentIdleSeconds` 동안 오디오가 없으면 activityEnd를 전송한다(end-of-speech).
+    private func resetSegmentIdleTimer() {
+        segmentIdleTask?.cancel()
+        let secs = segmentIdleSeconds
+        segmentIdleTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.endActivitySegment()
+        }
+    }
+
+    /// 무음 임계 도달 → 진행 중 발화 세그먼트를 종료(activityEnd 전송).
+    private func endActivitySegment() {
+        guard clientVADEnabled, activitySegmentActive, state == .ready, task != nil else { return }
+        activitySegmentActive = false
+        sendActivityEnd()
+        segmentIdleTask = nil
+        log.debug("activityEnd 전송(무음 \(self.segmentIdleSeconds, privacy: .public)s)")
+    }
+
+    /// activityStart 신호 전송(발화 세그먼트 시작). state==ready/ task 존재 가드.
+    private func sendActivityStart() {
+        sendRealtimeControl(RealtimeInputControl(realtimeInput: .init(activityStart: Empty(), activityEnd: nil)))
+    }
+
+    /// activityEnd 신호 전송(발화 세그먼트 종료). state==ready/ task 존재 가드.
+    private func sendActivityEnd() {
+        sendRealtimeControl(RealtimeInputControl(realtimeInput: .init(activityStart: nil, activityEnd: Empty())))
+    }
+
+    /// realtimeInput.activityStart/End 제어 메시지를 송신한다(인코딩/송신 가드 + 에러 처리).
+    private func sendRealtimeControl(_ control: RealtimeInputControl) {
+        guard state == .ready, let task else { return }
+        guard let data = try? JSONEncoder().encode(control),
+              let json = String(data: data, encoding: .utf8) else { return }
+        task.send(.string(json)) { [weak self] error in
+            if let error {
+                Task { await self?.handleSendError(error) }
+            }
+        }
+    }
+
+    /// activity 세그먼트 상태/타이머를 리셋한다(재연결/정지 경로에서 호출).
+    /// 새 소켓에서는 세그먼트를 처음부터 시작하므로, 이전 세그먼트 잔재를 남기지 않는다.
+    private func resetActivitySegment() {
+        activitySegmentActive = false
+        segmentIdleTask?.cancel()
+        segmentIdleTask = nil
     }
 
     // MARK: - 소켓 개폐
@@ -244,6 +335,7 @@ actor GeminiLiveClient {
         state = .connecting
         setupSent = false
         setupCompleteReceived = false   // A1: 새 연결 시도마다 리셋(이번 연결의 setup 수신 여부 추적)
+        resetActivitySegment()          // 새 소켓에선 발화 세그먼트를 처음부터 시작
 
         // 이전 세션 정리(재연결 시) 후 새 세대 시작.
         teardownSocket()
@@ -288,6 +380,7 @@ actor GeminiLiveClient {
         // 진행 중 이전 타이머가 스테일하게 발화하지 않는다(다음 setupComplete에서 재무장).
         proactiveReconnectTask?.cancel()
         proactiveReconnectTask = nil
+        resetActivitySegment()   // 소켓 정리 시 클라이언트 VAD 세그먼트/타이머도 정리
         receiveLoop?.cancel()
         receiveLoop = nil
         task?.cancel(with: .normalClosure, reason: nil)
@@ -413,6 +506,11 @@ actor GeminiLiveClient {
                     }
                     emit(.outputAudio(decoded))
                 }
+            }
+            // interrupted: 서버가 진행 중 응답을 중단함 → 소비자에게 즉시 정리 신호를 보낸다.
+            if content.interrupted == true {
+                log.info("interrupted 수신")
+                emit(.interrupted)
             }
             // 턴 종료는 별도 .turnComplete 이벤트로 명시 전달 — 빈 문자열 emit 같은 혼란을 없앤다.
             if content.turnComplete == true {
@@ -606,7 +704,13 @@ actor GeminiLiveClient {
             // 기본은 top-level translationConfig.
             translationConfig: useNestedTranslationConfig ? nil : translationConfig(),
             // 세션 재개(M2c): 보관된 핸들이 있으면 그 시점부터, 없으면 `{}`로 새 세션 재개 활성화.
-            sessionResumption: SessionResumptionConfig(handle: resumptionHandle)
+            sessionResumption: SessionResumptionConfig(handle: resumptionHandle),
+            // 클라이언트 VAD 모드일 때만 서버 자동 VAD를 끈다(double-VAD 제거).
+            // top-level 위치(model/generationConfig 형제) — translationConfig nested 규칙과 무관.
+            // clientVADEnabled=false면 nil → 필드 생략 → 서버 VAD 기본 ON 유지(기존 동작).
+            realtimeInputConfig: clientVADEnabled
+                ? RealtimeInputConfig(automaticActivityDetection: .init(disabled: true))
+                : nil
         ))
     }
 
@@ -729,9 +833,32 @@ private struct SetupMessage: Encodable {
         let translationConfig: TranslationConfig?
         /// 세션 재개 설정(M2c). handle nil이면 `{}`로 인코딩되어 "재개 활성화(새 세션)"를 의미.
         let sessionResumption: SessionResumptionConfig
+        /// 클라이언트 VAD 모드의 서버 자동 VAD off 설정. nil이면 키 생략(서버 VAD 기본 ON).
+        let realtimeInputConfig: RealtimeInputConfig?
     }
     let setup: Setup
 }
+
+/// 클라이언트 VAD 모드에서 서버 자동 VAD를 끄는 setup 설정(top-level).
+/// `automaticActivityDetection.disabled=true`면 서버가 발화 경계를 판정하지 않으며,
+/// 클라이언트가 activityStart/End로 발화 구간을 수동 지정해야 한다.
+private struct RealtimeInputConfig: Encodable {
+    struct AutomaticActivityDetection: Encodable { let disabled: Bool }
+    let automaticActivityDetection: AutomaticActivityDetection
+}
+
+/// realtimeInput.activityStart / activityEnd 제어 메시지(클라이언트 VAD 수동 신호).
+/// 둘 중 하나만 채워 보낸다(나머지는 nil → 키 생략). 본문은 빈 객체 `{}`.
+private struct RealtimeInputControl: Encodable {
+    struct RealtimeInput: Encodable {
+        let activityStart: Empty?
+        let activityEnd: Empty?
+    }
+    let realtimeInput: RealtimeInput
+}
+
+/// 빈 JSON 객체 `{}`(activityStart/End 본문).
+private struct Empty: Encodable {}
 
 /// 세션 재개 설정(M2c). handle이 nil이면 JSONEncoder가 키를 생략해 `{}`가 되어
 /// 새 세션에서 재개 기능을 활성화한다. handle이 있으면 그 시점부터 세션을 이어받는다.

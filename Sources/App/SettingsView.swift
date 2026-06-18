@@ -241,7 +241,12 @@ struct SettingsView: View {
         return Section("음성 감지(VAD)") {
             Toggle("음성 감지 사용", isOn: Binding(
                 get: { audio.vadEnabled },
-                set: { audio.vadEnabled = $0 }
+                set: {
+                    audio.vadEnabled = $0
+                    // VAD on/off는 setup의 서버 VAD on/off 결정(realtimeInputConfig)을 바꾸므로,
+                    // 번역 중이면 재연결해 setup을 갱신해야 한다(안 그러면 double-VAD 재발).
+                    appState.reloadTranslationSession()
+                }
             ))
             LabeledContent("모델 상태", value: audio.vadStatus.menuLabel)
         }

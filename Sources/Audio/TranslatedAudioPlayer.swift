@@ -164,6 +164,19 @@ final class TranslatedAudioPlayer {
         log.info("번역 오디오 재생 정지")
     }
 
+    /// 스케줄된(아직 재생되지 않은) 버퍼를 즉시 비운다(서버 interrupted 대응).
+    /// 진행 중 번역 오디오를 끊되 재생은 계속 가능한 상태로 둔다:
+    /// `player.stop()`으로 큐를 비우고, 재생 중이었으면 `player.play()`로 즉시 재개한다.
+    /// in-flight 카운터/직전 청크 비교 상태도 리셋해 다음 청크가 깨끗하게 들어오게 한다.
+    func flush() {
+        guard running else { return }
+        player.stop()        // 스케줄된 버퍼 폐기(큐 클리어)
+        inFlight.reset()
+        lastEnqueuedData = nil
+        player.play()        // 큐만 비우고 재생은 지속(다음 enqueue를 즉시 받음)
+        log.info("번역 오디오 flush(interrupted — 잔여 버퍼 폐기)")
+    }
+
     /// 24kHz mono Int16 LE PCM Data를 재생 큐에 추가한다(재생 중일 때만).
     func enqueue(int16LE data: Data) {
         guard running, !data.isEmpty else { return }

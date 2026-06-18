@@ -167,7 +167,8 @@ final class SubtitleEngine {
     private func appendIfMeaningful(_ delta: String, to buffer: inout String) -> Bool {
         guard !delta.isEmpty else { return false }
         if buffer.isEmpty {
-            let collapsed = Self.collapseRepeats(delta)
+            // collapseRepeats(즉시 반복) → dedupGlobalSentences(전역 중복 문장) 순으로 정리.
+            let collapsed = Self.dedupGlobalSentences(Self.collapseRepeats(delta))
             guard !collapsed.isEmpty else { return false }
             buffer = collapsed
             return true
@@ -183,9 +184,11 @@ final class SubtitleEngine {
         let newPart = String(dChars.dropFirst(k))
         guard !newPart.isEmpty else { return false }
         let merged = buffer + newPart
-        let collapsed = Self.collapseRepeats(merged)
+        // collapseRepeats(즉시 반복) → dedupGlobalSentences(전역 중복 문장) 순으로 정리.
+        let collapsed = Self.dedupGlobalSentences(Self.collapseRepeats(merged))
         guard collapsed != buffer else { return false }
-        // 진단: 겹침 k / 새로 붙인 길이. collapse로 줄어든 경우 중복 붕괴 remark(반복/피드백 신호).
+        // 진단: 겹침 k / 새로 붙인 길이. 정리로 줄어든 경우 중복 붕괴 remark(반복/피드백 신호).
+        // 길이 변화는 collapseRepeats + dedupGlobalSentences 둘을 합친 전후 길이(merged→collapsed).
         if collapsed.count < merged.count {
             log.debug("append: 겹침k=\(k, privacy: .public) newPart=\(newPart.count, privacy: .public)자, 중복 붕괴: \(merged.count, privacy: .public)→\(collapsed.count, privacy: .public)자")
         } else {
@@ -227,6 +230,38 @@ final class SubtitleEngine {
         return tokens.joined(separator: " ")
     }
 
+    /// 누적 버퍼에서 **이미 등장한 동일 문장의 재등장**을 제거한다(첫 등장만 유지).
+    /// translate 모델이 앞 문장을 나중에 다시 흘리는(비연속) 반복을 정리한다.
+    /// 종결부호(. ! ? 。 ！ ？) 기준으로 문장을 나누고, 공백 무시 정규화로 비교한다.
+    /// **진행 중인 마지막 조각(종결부호로 안 끝남)은 성장 중이므로 절대 제거하지 않는다.**
+    /// 너무 짧은 문장(norm 길이 < 4)은 우연 중복 방지를 위해 dedup 대상에서 제외한다("네." "음." 보호).
+    private static func dedupGlobalSentences(_ text: String) -> String {
+        let terminators: Set<Character> = [".", "!", "?", "。", "！", "？"]
+        // 문장 토큰화(종결부호 포함). 마지막 토큰이 종결부호로 안 끝나면 "진행 중"으로 표시.
+        var sentences: [String] = []
+        var cur = ""
+        for ch in text {
+            cur.append(ch)
+            if terminators.contains(ch) { sentences.append(cur); cur = "" }
+        }
+        let hasPartialTail = !cur.isEmpty
+        if hasPartialTail { sentences.append(cur) }
+        func norm(_ s: String) -> String { s.filter { !$0.isWhitespace } }
+        var seen = Set<String>()
+        var result: [String] = []
+        for (i, s) in sentences.enumerated() {
+            let isPartialLast = hasPartialTail && i == sentences.count - 1
+            let key = norm(s)
+            // 짧은 문장(norm < 4)은 seen 비교를 건너뛰고 항상 유지(우연 중복/짧은 감탄 보호).
+            if !isPartialLast, key.count >= 4, seen.contains(key) {
+                continue   // 이미 표시한 완성 문장의 재등장 → 제거
+            }
+            if !isPartialLast, key.count >= 4 { seen.insert(key) }
+            result.append(s)
+        }
+        return result.joined()
+    }
+
     // MARK: - 내부: 확정/표시
 
     /// 현재 누적 줄을 확정으로 고정하고 holdSeconds 후 페이드아웃 타이머를 건다.
@@ -236,11 +271,12 @@ final class SubtitleEngine {
         log.debug("자막 확정: 사유=\(reason.rawValue, privacy: .public), len=\(self.currentTranslation.count)")
         silenceTask?.cancel(); silenceTask = nil
 
-        // 수정2: 확정 직전 collapse를 한 번 더 적용한다. charBreak가 중복 구가 완성되기
+        // 수정2: 확정 직전 정리를 한 번 더 적용한다. charBreak가 중복 구가 완성되기
         // 전에 끊어 누적 버퍼에 반복 잔여가 남는 경우가 있어, 확정 줄에 중복이 고정되지
-        // 않도록 번역/원문 모두 collapseRepeats(토큰 단위 즉시-반복 붕괴)로 재정리한다.
-        let collapsedTranslation = Self.collapseRepeats(currentTranslation)
-        let collapsedSource = Self.collapseRepeats(currentSource)
+        // 않도록 번역/원문 모두 collapseRepeats(즉시 반복) → dedupGlobalSentences(전역
+        // 중복 문장) 순으로 재정리한다.
+        let collapsedTranslation = Self.dedupGlobalSentences(Self.collapseRepeats(currentTranslation))
+        let collapsedSource = Self.dedupGlobalSentences(Self.collapseRepeats(currentSource))
 
         // 공백 무시 비교(확정↔다음 줄 경계 중복 판정용).
         func norm(_ s: String) -> String { s.filter { !$0.isWhitespace } }
