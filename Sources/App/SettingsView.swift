@@ -340,12 +340,204 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - 자막 스타일 (M4 placeholder)
+    // MARK: - 자막 스타일 (M4, FR-7 / 스펙 §5.5)
 
     private var subtitleStyleSection: some View {
-        Section("자막 스타일") {
-            Text("추후 제공 (M4) — 폰트·크기·색상·외곽선·글로우 등")
-                .foregroundStyle(.secondary)
+        let settings = appState.settings
+        return Section("자막 스타일") {
+            stylePreview
+            fontFamilyPicker
+            fontSizeSlider
+            weightPicker
+            alignPicker
+            maxLinesStepper
+            textColorPicker
+            strokeControls
+            glowControls
+            backgroundControls
+            Button("스타일 기본값으로 리셋") { settings.resetSubtitleStyle() }
+        }
+    }
+
+    /// 실시간 미리보기(설정 변경 즉시 반영). 오버레이와 동일한 StyledSubtitleText 사용.
+    @ViewBuilder
+    private var stylePreview: some View {
+        let settings = appState.settings
+        let style = SubtitleStyle(settings: settings)
+        ZStack {
+            // 대표 배경(밝음~어두움) 위에서 가독성 확인.
+            LinearGradient(
+                colors: [Color(white: 0.55), Color(white: 0.12)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            Group {
+                if style.backgroundEnabled {
+                    StyledSubtitleText(
+                        text: "안녕하세요, 자막 미리보기입니다",
+                        size: settings.subtitleFontSize,
+                        style: style
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black.opacity(style.backgroundOpacity))
+                    )
+                } else {
+                    StyledSubtitleText(
+                        text: "안녕하세요, 자막 미리보기입니다",
+                        size: settings.subtitleFontSize,
+                        style: style
+                    )
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+        .frame(height: 120)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var fontFamilyPicker: some View {
+        let settings = appState.settings
+        Picker("폰트", selection: Binding(
+            get: { settings.subtitleFontName },
+            set: { settings.subtitleFontName = $0 }
+        )) {
+            Text("시스템 기본").tag("")
+            ForEach(NSFontManager.shared.availableFontFamilies.sorted(), id: \.self) { family in
+                Text(family).tag(family)
+            }
+        }
+        .pickerStyle(.menu)
+    }
+
+    @ViewBuilder
+    private var fontSizeSlider: some View {
+        let settings = appState.settings
+        VStack(alignment: .leading) {
+            LabeledContent("크기", value: "\(Int(settings.subtitleFontSize)) pt")
+            Slider(
+                value: Binding(
+                    get: { settings.subtitleFontSize },
+                    set: { settings.subtitleFontSize = $0 }
+                ),
+                in: 16...72,
+                step: 1
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var weightPicker: some View {
+        let settings = appState.settings
+        Picker("두께", selection: Binding(
+            get: { settings.subtitleFontWeight },
+            set: { settings.subtitleFontWeight = $0 }
+        )) {
+            ForEach(SubtitleFontWeight.allCases) { w in
+                Text(w.label).tag(w)
+            }
+        }
+        .pickerStyle(.menu)
+    }
+
+    @ViewBuilder
+    private var alignPicker: some View {
+        let settings = appState.settings
+        Picker("정렬", selection: Binding(
+            get: { settings.subtitleTextAlign },
+            set: { settings.subtitleTextAlign = $0 }
+        )) {
+            ForEach(SubtitleTextAlign.allCases) { a in
+                Text(a.label).tag(a)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    @ViewBuilder
+    private var maxLinesStepper: some View {
+        let settings = appState.settings
+        Stepper(
+            "최대 줄수: \(settings.subtitleMaxLines)",
+            value: Binding(
+                get: { settings.subtitleMaxLines },
+                set: { settings.subtitleMaxLines = $0 }
+            ),
+            in: 1...4
+        )
+    }
+
+    @ViewBuilder
+    private var textColorPicker: some View {
+        let settings = appState.settings
+        ColorPicker("글자색", selection: Binding(
+            get: { settings.subtitleTextColor },
+            set: { settings.subtitleTextColor = $0 }
+        ), supportsOpacity: true)
+    }
+
+    @ViewBuilder
+    private var strokeControls: some View {
+        let settings = appState.settings
+        Toggle("외곽선", isOn: Binding(
+            get: { settings.subtitleStrokeEnabled },
+            set: { settings.subtitleStrokeEnabled = $0 }
+        ))
+        if settings.subtitleStrokeEnabled {
+            ColorPicker("외곽선 색", selection: Binding(
+                get: { settings.subtitleStrokeColor },
+                set: { settings.subtitleStrokeColor = $0 }
+            ), supportsOpacity: true)
+        }
+    }
+
+    @ViewBuilder
+    private var glowControls: some View {
+        let settings = appState.settings
+        Toggle("글로우", isOn: Binding(
+            get: { settings.subtitleGlowEnabled },
+            set: { settings.subtitleGlowEnabled = $0 }
+        ))
+        if settings.subtitleGlowEnabled {
+            ColorPicker("글로우 색", selection: Binding(
+                get: { settings.subtitleGlowColor },
+                set: { settings.subtitleGlowColor = $0 }
+            ), supportsOpacity: true)
+            VStack(alignment: .leading) {
+                LabeledContent("글로우 반경", value: "\(Int(settings.subtitleGlowRadius))")
+                Slider(
+                    value: Binding(
+                        get: { settings.subtitleGlowRadius },
+                        set: { settings.subtitleGlowRadius = $0 }
+                    ),
+                    in: 0...30,
+                    step: 1
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var backgroundControls: some View {
+        let settings = appState.settings
+        Toggle("배경 박스", isOn: Binding(
+            get: { settings.subtitleBackgroundEnabled },
+            set: { settings.subtitleBackgroundEnabled = $0 }
+        ))
+        if settings.subtitleBackgroundEnabled {
+            VStack(alignment: .leading) {
+                LabeledContent("배경 불투명도", value: String(format: "%.0f%%", settings.subtitleBackgroundOpacity * 100))
+                Slider(
+                    value: Binding(
+                        get: { settings.subtitleBackgroundOpacity },
+                        set: { settings.subtitleBackgroundOpacity = $0 }
+                    ),
+                    in: 0...1
+                )
+            }
         }
     }
 

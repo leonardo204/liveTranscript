@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import Observation
+import SwiftUI
 
 /// 자막 HUD의 화면 내 세로 위치(스펙 §5.3 — 하단 중앙 기본).
 /// 결정적 raw 값으로 영속화한다(Date/난수 없음).
@@ -56,6 +57,37 @@ final class SettingsStore {
         static let subtitleScreenID = "subtitle.screenID"
         static let subtitleVerticalPosition = "subtitle.verticalPosition"
         static let subtitleAutoShowOnCapture = "subtitle.autoShowOnCapture"
+        // 자막 스타일 (M4, FR-7) — 색은 sRGB "#RRGGBBAA" 문자열로 영속.
+        static let subtitleFontName = "subtitle.style.fontName"
+        static let subtitleFontSize = "subtitle.style.fontSize"
+        static let subtitleFontWeight = "subtitle.style.weight"
+        static let subtitleTextColor = "subtitle.style.textColor"
+        static let subtitleStrokeEnabled = "subtitle.style.strokeEnabled"
+        static let subtitleStrokeColor = "subtitle.style.strokeColor"
+        static let subtitleGlowEnabled = "subtitle.style.glowEnabled"
+        static let subtitleGlowColor = "subtitle.style.glowColor"
+        static let subtitleGlowRadius = "subtitle.style.glowRadius"
+        static let subtitleBackgroundEnabled = "subtitle.style.bgEnabled"
+        static let subtitleBackgroundOpacity = "subtitle.style.bgOpacity"
+        static let subtitleTextAlign = "subtitle.style.align"
+        static let subtitleMaxLines = "subtitle.style.maxLines"
+    }
+
+    /// 자막 스타일 기본값(리셋 시에도 동일 사용). 결정적 상수만.
+    private enum StyleDefault {
+        static let fontName = ""
+        static let fontSize = 34.0
+        static let weight = SubtitleFontWeight.bold
+        static let textColorHex = "#FFFFFFFF"
+        static let strokeEnabled = true
+        static let strokeColorHex = "#000000E6"
+        static let glowEnabled = false
+        static let glowColorHex = "#00E5FFCC"
+        static let glowRadius = 8.0
+        static let backgroundEnabled = true
+        static let backgroundOpacity = 0.35
+        static let align = SubtitleTextAlign.center
+        static let maxLines = 2
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -71,6 +103,20 @@ final class SettingsStore {
             Key.subtitleMaxCharsBeforeBreak: AppConfig.defaultMaxCharsBeforeBreak,
             // 비용 HUD 기본 on(스펙 §9.4 — 세션 비용 가시화).
             Key.costHUDEnabled: true,
+            // 자막 스타일 기본값(M4, FR-7).
+            Key.subtitleFontName: StyleDefault.fontName,
+            Key.subtitleFontSize: StyleDefault.fontSize,
+            Key.subtitleFontWeight: StyleDefault.weight.rawValue,
+            Key.subtitleTextColor: StyleDefault.textColorHex,
+            Key.subtitleStrokeEnabled: StyleDefault.strokeEnabled,
+            Key.subtitleStrokeColor: StyleDefault.strokeColorHex,
+            Key.subtitleGlowEnabled: StyleDefault.glowEnabled,
+            Key.subtitleGlowColor: StyleDefault.glowColorHex,
+            Key.subtitleGlowRadius: StyleDefault.glowRadius,
+            Key.subtitleBackgroundEnabled: StyleDefault.backgroundEnabled,
+            Key.subtitleBackgroundOpacity: StyleDefault.backgroundOpacity,
+            Key.subtitleTextAlign: StyleDefault.align.rawValue,
+            Key.subtitleMaxLines: StyleDefault.maxLines,
         ])
         self.monitorEnabled = defaults.bool(forKey: Key.monitorEnabled)
         self.monitorAutoShowOnCapture = defaults.bool(forKey: Key.monitorAutoShowOnCapture)
@@ -86,6 +132,27 @@ final class SettingsStore {
         self.subtitleAutoShowOnCapture = defaults.bool(forKey: Key.subtitleAutoShowOnCapture)
         self.subtitleMaxCharsBeforeBreak = defaults.integer(forKey: Key.subtitleMaxCharsBeforeBreak)
         self.costHUDEnabled = defaults.bool(forKey: Key.costHUDEnabled)
+        // 자막 스타일 복원(M4). enum은 raw 저장/복원 패턴, 색은 hex 문자열로 영속.
+        self.subtitleFontName = defaults.string(forKey: Key.subtitleFontName) ?? StyleDefault.fontName
+        self.subtitleFontSize = defaults.double(forKey: Key.subtitleFontSize)
+        self.subtitleFontWeight =
+            SubtitleFontWeight(rawValue: defaults.string(forKey: Key.subtitleFontWeight) ?? "")
+            ?? StyleDefault.weight
+        self.subtitleTextColorHex =
+            defaults.string(forKey: Key.subtitleTextColor) ?? StyleDefault.textColorHex
+        self.subtitleStrokeEnabled = defaults.bool(forKey: Key.subtitleStrokeEnabled)
+        self.subtitleStrokeColorHex =
+            defaults.string(forKey: Key.subtitleStrokeColor) ?? StyleDefault.strokeColorHex
+        self.subtitleGlowEnabled = defaults.bool(forKey: Key.subtitleGlowEnabled)
+        self.subtitleGlowColorHex =
+            defaults.string(forKey: Key.subtitleGlowColor) ?? StyleDefault.glowColorHex
+        self.subtitleGlowRadius = defaults.double(forKey: Key.subtitleGlowRadius)
+        self.subtitleBackgroundEnabled = defaults.bool(forKey: Key.subtitleBackgroundEnabled)
+        self.subtitleBackgroundOpacity = defaults.double(forKey: Key.subtitleBackgroundOpacity)
+        self.subtitleTextAlign =
+            SubtitleTextAlign(rawValue: defaults.string(forKey: Key.subtitleTextAlign) ?? "")
+            ?? StyleDefault.align
+        self.subtitleMaxLines = defaults.integer(forKey: Key.subtitleMaxLines)
     }
 
     // MARK: - 입력 소스 영속화 (태스크 A)
@@ -184,6 +251,110 @@ final class SettingsStore {
     /// 캡처 시작 시 자막 HUD 자동 표시(기본 on), 정지 시 숨김.
     var subtitleAutoShowOnCapture: Bool {
         didSet { defaults.set(subtitleAutoShowOnCapture, forKey: Key.subtitleAutoShowOnCapture) }
+    }
+
+    // MARK: - 자막 스타일 (M4, FR-7 / 스펙 §5.5)
+
+    /// 자막 폰트 패밀리명("" = 시스템 rounded).
+    var subtitleFontName: String {
+        didSet { defaults.set(subtitleFontName, forKey: Key.subtitleFontName) }
+    }
+
+    /// 자막 폰트 크기(pt, UI 범위 16...72).
+    var subtitleFontSize: Double {
+        didSet { defaults.set(subtitleFontSize, forKey: Key.subtitleFontSize) }
+    }
+
+    /// 자막 글자 두께(raw 저장).
+    var subtitleFontWeight: SubtitleFontWeight {
+        didSet { defaults.set(subtitleFontWeight.rawValue, forKey: Key.subtitleFontWeight) }
+    }
+
+    /// 자막 글자색(sRGB "#RRGGBBAA"로 영속). UI는 `subtitleTextColor` 사용.
+    var subtitleTextColorHex: String {
+        didSet { defaults.set(subtitleTextColorHex, forKey: Key.subtitleTextColor) }
+    }
+
+    /// 외곽선(그림자) 사용 여부.
+    var subtitleStrokeEnabled: Bool {
+        didSet { defaults.set(subtitleStrokeEnabled, forKey: Key.subtitleStrokeEnabled) }
+    }
+
+    /// 외곽선 색(sRGB hex 영속). UI는 `subtitleStrokeColor` 사용.
+    var subtitleStrokeColorHex: String {
+        didSet { defaults.set(subtitleStrokeColorHex, forKey: Key.subtitleStrokeColor) }
+    }
+
+    /// 글로우 사용 여부(기본 off).
+    var subtitleGlowEnabled: Bool {
+        didSet { defaults.set(subtitleGlowEnabled, forKey: Key.subtitleGlowEnabled) }
+    }
+
+    /// 글로우 색(sRGB hex 영속). UI는 `subtitleGlowColor` 사용.
+    var subtitleGlowColorHex: String {
+        didSet { defaults.set(subtitleGlowColorHex, forKey: Key.subtitleGlowColor) }
+    }
+
+    /// 글로우 반경(UI 범위 0...30).
+    var subtitleGlowRadius: Double {
+        didSet { defaults.set(subtitleGlowRadius, forKey: Key.subtitleGlowRadius) }
+    }
+
+    /// 배경 박스 사용 여부.
+    var subtitleBackgroundEnabled: Bool {
+        didSet { defaults.set(subtitleBackgroundEnabled, forKey: Key.subtitleBackgroundEnabled) }
+    }
+
+    /// 배경 박스 불투명도(0...1).
+    var subtitleBackgroundOpacity: Double {
+        didSet { defaults.set(subtitleBackgroundOpacity, forKey: Key.subtitleBackgroundOpacity) }
+    }
+
+    /// 자막 가로 정렬(raw 저장).
+    var subtitleTextAlign: SubtitleTextAlign {
+        didSet { defaults.set(subtitleTextAlign.rawValue, forKey: Key.subtitleTextAlign) }
+    }
+
+    /// 자막 최대 줄수(UI 범위 1...4).
+    var subtitleMaxLines: Int {
+        didSet { defaults.set(subtitleMaxLines, forKey: Key.subtitleMaxLines) }
+    }
+
+    // 색 UI 편의용 Color 계산 프로퍼티(hex 문자열과 양방향 변환).
+
+    /// 자막 글자색(ColorPicker 바인딩용). 내부적으로 hex 문자열에 영속.
+    var subtitleTextColor: Color {
+        get { Color(hexRGBA: subtitleTextColorHex, fallback: .white) }
+        set { subtitleTextColorHex = newValue.toHexRGBA() }
+    }
+
+    /// 외곽선 색(ColorPicker 바인딩용).
+    var subtitleStrokeColor: Color {
+        get { Color(hexRGBA: subtitleStrokeColorHex, fallback: .black) }
+        set { subtitleStrokeColorHex = newValue.toHexRGBA() }
+    }
+
+    /// 글로우 색(ColorPicker 바인딩용).
+    var subtitleGlowColor: Color {
+        get { Color(hexRGBA: subtitleGlowColorHex, fallback: Color(.sRGB, red: 0, green: 0.9, blue: 1, opacity: 0.8)) }
+        set { subtitleGlowColorHex = newValue.toHexRGBA() }
+    }
+
+    /// 모든 자막 스타일 속성을 기본값으로 되돌린다(설정 "스타일 기본값으로 리셋").
+    func resetSubtitleStyle() {
+        subtitleFontName = StyleDefault.fontName
+        subtitleFontSize = StyleDefault.fontSize
+        subtitleFontWeight = StyleDefault.weight
+        subtitleTextColorHex = StyleDefault.textColorHex
+        subtitleStrokeEnabled = StyleDefault.strokeEnabled
+        subtitleStrokeColorHex = StyleDefault.strokeColorHex
+        subtitleGlowEnabled = StyleDefault.glowEnabled
+        subtitleGlowColorHex = StyleDefault.glowColorHex
+        subtitleGlowRadius = StyleDefault.glowRadius
+        subtitleBackgroundEnabled = StyleDefault.backgroundEnabled
+        subtitleBackgroundOpacity = StyleDefault.backgroundOpacity
+        subtitleTextAlign = StyleDefault.align
+        subtitleMaxLines = StyleDefault.maxLines
     }
 
     // MARK: - 번역 (M2a)
