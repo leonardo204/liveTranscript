@@ -201,6 +201,7 @@ struct SettingsView: View {
 
     private var generalTab: some View {
         Form {
+            updateSection
             generalSection
         }
         .formStyle(.grouped)
@@ -484,6 +485,22 @@ struct SettingsView: View {
             Button("확인") {}
         } message: {
             Text("입력을 ‘시스템 직접 캡쳐’로 전환했습니다. 스피커/헤드폰으로 듣고 피드백을 막으려면 아래에서 번역 오디오 ‘출력 장치’를 선택하세요. 출력을 BlackHole 등 캡처용 가상 장치로 두면 번역이 들리지 않고 피드백 루프가 생깁니다.")
+        }
+    }
+
+    // MARK: - 업데이트 (Sparkle 자동 업데이트)
+
+    /// 자동 업데이트 섹션. 현재 버전 표시 + 자동확인 토글 + 즉시 확인 버튼.
+    /// 실제 업데이트 검증은 Info.plist `SUPublicEDKey`(EdDSA 공개키) 교체 후 동작한다.
+    private var updateSection: some View {
+        Section("업데이트") {
+            LabeledContent("현재 버전", value: appState.updates.currentVersion)
+            Toggle("자동으로 업데이트 확인", isOn: Binding(
+                get: { appState.updates.automaticallyChecksForUpdates },
+                set: { appState.updates.automaticallyChecksForUpdates = $0 }
+            ))
+            Button("지금 업데이트 확인") { appState.updates.checkForUpdates() }
+                .disabled(!appState.updates.canCheckForUpdates)
         }
     }
 

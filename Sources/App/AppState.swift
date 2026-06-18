@@ -45,6 +45,10 @@ final class AppState {
     /// 주의: 번역 오디오도 같은 출력 장치로 나가므로 함께 작아진다(설계상 부분 덕킹).
     let systemAudioDucker = SystemAudioDucker()
 
+    /// Sparkle 자동 업데이트 관리자. 앱 수명 동안 1개만 보유한다(launch 시 업데이터 가동).
+    /// 설정 창 "일반 > 업데이트" 섹션에서 현재 버전 표시/자동확인 토글/즉시 확인을 제공한다.
+    let updates = UpdateChecker()
+
     // MARK: - Gemini 연동 (M2a)
 
     /// Gemini 연결/번역 상태 라벨(메뉴/HUD 표시용). 키는 절대 포함하지 않는다.

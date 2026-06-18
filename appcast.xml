@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>liveTranslate Changelog</title>
+    <link>https://github.com/leonardo204/liveTranscript</link>
+    <description>liveTranslate 업데이트 피드</description>
+    <language>ko</language>
+    <item>
+      <title>liveTranslate 0.1.0</title>
+      <link>https://github.com/leonardo204/liveTranscript/releases/tag/v0.1.0</link>
+      <sparkle:version>1</sparkle:version>
+      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Thu, 18 Jun 2026 18:04:19 +0900</pubDate>
+      <enclosure url="https://github.com/leonardo204/liveTranscript/releases/download/v0.1.0/liveTranslate-0.1.0.dmg"
+                 sparkle:edSignature="kPOcm6z7HxmFurnDvQUzIv9c658zU5u/drYLq8HLpYF7xymuBK0Y1iTfHp2TmapR0sLQO17nNjWCdlAxLzHwCA==" length="5519922" type="application/octet-stream"/>
+    </item>
+    <!-- 릴리스마다 scripts/release.sh가 아래 형식의 <item>을 추가한다. 예시:
+    <item>
+      <title>liveTranslate 0.2.0</title>
+      <link>https://github.com/leonardo204/liveTranscript/releases/tag/v0.2.0</link>
+      <sparkle:version>2</sparkle:version>
+      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 18 Jun 2026 12:00:00 +0900</pubDate>
+      <enclosure url="https://github.com/leonardo204/liveTranscript/releases/download/v0.2.0/liveTranslate-0.2.0.dmg"
+                 sparkle:edSignature="..." length="..." type="application/octet-stream"/>
+    </item>
+    -->
+  </channel>
+</rss>

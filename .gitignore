@@ -27,3 +27,7 @@ DerivedData/
 .claude/.hook_feedback
 .claude/.project_root
 .claude/.messenger_enabled
+
+# 빌드 산출물
+build/
+*.xcarchive
