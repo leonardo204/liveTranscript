@@ -110,11 +110,24 @@ struct MonitorHUD: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Text("번역: \(appState.geminiStatus)")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+            if appState.apiKeyLoaded {
+                Text("번역: \(appState.geminiStatus)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                // 키 없음: 눈에 띄는 경고로 노출(설정으로 유도).
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                    Text("API 키 없음 — 설정에서 입력")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .foregroundStyle(.orange)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            }
         }
     }
 

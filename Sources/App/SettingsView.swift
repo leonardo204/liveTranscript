@@ -14,6 +14,11 @@ struct SettingsView: View {
     // 자막 위치 선택용 화면 목록(연결/해제 시 새로고침).
     @State private var screens: [ScreenOption] = []
 
+    // API 키 입력 버퍼(화면에만 존재, 저장 시 Keychain으로만 이동). 저장/삭제 후 비운다.
+    @State private var apiKeyInput: String = ""
+    // 저장/삭제 실패 등 사용자에게 보여줄 일시 메시지(키 비포함).
+    @State private var apiKeyMessage: String?
+
     var body: some View {
         Form {
             inputSection
@@ -222,13 +227,116 @@ struct SettingsView: View {
 
     private var apiKeySection: some View {
         Section("API 키") {
-            LabeledContent("Gemini API 키") {
-                Text(appState.apiKeyLoaded ? "로드됨" : "없음")
+            // 현재 키 출처(값은 표시하지 않음).
+            LabeledContent("현재") {
+                Text(keySourceLabel)
                     .foregroundStyle(appState.apiKeyLoaded ? .green : .secondary)
             }
-            Text("보안을 위해 키 값은 표시하지 않습니다.")
+
+            // 키 입력(마스킹). 화면 버퍼에만 존재, 저장 시 Keychain으로만 이동.
+            SecureField("Gemini API 키 입력", text: $apiKeyInput)
+                .textFieldStyle(.roundedBorder)
+                .onChange(of: apiKeyInput) {
+                    // 입력이 바뀌면 직전 테스트 결과가 무의미하므로 초기화.
+                    appState.resetConnectionTestState()
+                    apiKeyMessage = nil
+                }
+
+            // 흐름: 입력 → 연결 테스트(성공) → 저장. 연결 테스트를 저장보다 앞(왼쪽)에 둔다.
+            HStack {
+                Button("연결 테스트") { appState.testConnection(candidateKey: apiKeyInput) }
+                    .disabled((apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !appState.apiKeyLoaded) || isTesting)
+                Button("저장") { saveAPIKey() }
+                    .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isTestSucceeded)
+                Spacer()
+                Button("삭제", role: .destructive) { clearAPIKey() }
+                    .disabled(appState.keySource != .keychain)
+            }
+
+            // 연결 테스트 상태 표시.
+            connectionTestStatusView
+
+            // 저장/삭제 결과 메시지(있을 때만).
+            if let message = apiKeyMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("키를 입력하고 먼저 연결 테스트에 성공해야 저장할 수 있습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Text("보안을 위해 키 값은 표시하지 않습니다. 저장된 키는 macOS Keychain에 보관됩니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// 연결 테스트 진행/결과 표시(키 비포함).
+    @ViewBuilder
+    private var connectionTestStatusView: some View {
+        switch appState.connectionTestState {
+        case .idle:
+            EmptyView()
+        case .testing:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("테스트 중…").foregroundStyle(.secondary)
+            }
+        case .success:
+            Label {
+                Text("연결됨").foregroundStyle(.green)
+            } icon: {
+                Image(systemName: "circle.fill").foregroundStyle(.green)
+            }
+        case .failure(let reason):
+            Label {
+                Text("연결 실패: \(reason)").foregroundStyle(.red)
+            } icon: {
+                Image(systemName: "circle.fill").foregroundStyle(.red)
+            }
+        }
+    }
+
+    /// 테스트 진행 중 여부(버튼 비활성화용).
+    private var isTesting: Bool {
+        if case .testing = appState.connectionTestState { return true }
+        return false
+    }
+
+    /// 연결 테스트가 성공했는지 여부(저장 버튼 활성화 조건).
+    private var isTestSucceeded: Bool {
+        if case .success = appState.connectionTestState { return true }
+        return false
+    }
+
+    /// 현재 키 출처 라벨.
+    private var keySourceLabel: String {
+        switch appState.keySource {
+        case .keychain: return "저장된 키 사용 중"
+        case .none:     return "키 없음 — 키를 입력하세요"
+        }
+    }
+
+    private func saveAPIKey() {
+        switch appState.saveAPIKey(apiKeyInput) {
+        case .success:
+            apiKeyInput = ""
+            apiKeyMessage = "키를 저장했습니다."
+        case .failure:
+            // 사유 원문에 키가 섞이지 않도록 일반화된 메시지만 노출.
+            apiKeyMessage = "키 저장에 실패했습니다."
+        }
+    }
+
+    private func clearAPIKey() {
+        switch appState.clearAPIKey() {
+        case .success:
+            apiKeyInput = ""
+            apiKeyMessage = "저장된 키를 삭제했습니다."
+        case .failure:
+            apiKeyMessage = "키 삭제에 실패했습니다."
         }
     }
 
