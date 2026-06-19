@@ -30,6 +30,11 @@ enum PipelineEvent: Sendable {
     case translatedText(delta: String)
     case turnComplete
     case generationComplete
+    // 세그먼트(교체) 모델 — STT/MT 엔진용(spec 007 §5). delta 누적과 별개로 "현재 세그먼트
+    // 전체"를 교체한다. isFinal=true면 발화/세그먼트 확정(자막 confirm 경계). Gemini는 위 delta
+    // 경로를 그대로 쓰고, ComposedTranslationProvider만 이 segment 경로를 방출한다.
+    case sourceSegment(text: String, isFinal: Bool)      // 원문 세그먼트 전체(교체)
+    case translatedSegment(text: String, isFinal: Bool)  // 번역 세그먼트 전체(교체)
     case outputAudio(Data)
     case usage(UsageMetric)
 }

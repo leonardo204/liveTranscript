@@ -23,7 +23,13 @@ struct TranslationProviderFactory {
                 requestInputTranscription: desc.capabilities.sourceText && settings.showSourceText,
                 capabilities: desc.engineCapabilities
             )
-        case .onDeviceTranscribe, .onDeviceTranslate:
+        case .onDeviceTranslate:
+            // spec 007: 엔진-무관 스캐폴딩(§7.2)까지 완료. 실제 AppleSpeechSTTStage/AppleTranslationStage
+            // (§7.3/§7.4)는 미구현이므로 현재는 nil 반환 → 호출자가 "준비 중"으로 정지 수렴한다.
+            // (OS 미달 모델은 애초에 UI에서 비활성이라 여기 도달하지 않는다.)
+            Self.log.info("\(LogTag.factory, privacy: .public) onDeviceTranslate 준비 중(엔진 미구현) — engine=\(desc.engine.rawValue, privacy: .public)")
+            return nil
+        case .onDeviceTranscribe:
             Self.log.info("\(LogTag.factory, privacy: .public) unsupported engine — engine=\(desc.engine.rawValue, privacy: .public) (준비 중)")
             return nil   // spec 003 미적용 — 호출자가 "준비 중"으로 정지 수렴.
         }

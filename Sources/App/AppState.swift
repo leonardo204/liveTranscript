@@ -311,6 +311,8 @@ final class AppState {
         var engine: TranslationEngineKind
         var modelID: String
         var targetLanguage: String
+        /// 소스(전사) 언어 — 조합형 STT 엔진 전용(spec 007 §6). 변경 시에도 핫스왑된다.
+        var sourceLanguage: String
         var showSource: Bool
         var keyFingerprint: String?
     }
@@ -329,6 +331,7 @@ final class AppState {
             engine: model.engine,
             modelID: model.id,   // 모델 변경 시 config diff → 핫스왑(spec 005 §4.1).
             targetLanguage: settings.targetLanguageCode,
+            sourceLanguage: settings.sourceLanguageCode,   // 소스 언어 변경도 핫스왑(spec 007 §6).
             showSource: settings.showSourceText,
             keyFingerprint: geminiAPIKey().map(Self.fingerprint)
         )
@@ -593,6 +596,12 @@ final class AppState {
             subtitles.ingestTranslationDelta(delta)
         case .sourceText(let delta):
             subtitles.ingestSourceDelta(delta)
+        case .sourceSegment(let text, let isFinal):
+            // 세그먼트(교체) 경로 — STT/MT 엔진(spec 007 §5). 원문 줄만 갱신(번역 줄은 유지=nil).
+            subtitles.ingestSegment(translation: nil, source: text, isFinal: isFinal)
+        case .translatedSegment(let text, let isFinal):
+            // 번역 줄만 갱신(원문 줄은 유지=nil). 메인 자막은 번역 세그먼트가 채운다.
+            subtitles.ingestSegment(translation: text, source: nil, isFinal: isFinal)
         case .turnComplete:
             subtitles.ingestTurnComplete()
         case .generationComplete:

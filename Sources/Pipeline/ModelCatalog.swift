@@ -63,6 +63,7 @@ struct ModelCatalog {
         pipeline: .integrated,
         requiresAPIKey: true,
         available: true,
+        minOS: nil,   // Gemini 클라우드 — OS 제약 없음(폴백 디스크립터).
         capabilities: ModelDescriptor.Caps(
             sourceText: true,
             translatedText: true,

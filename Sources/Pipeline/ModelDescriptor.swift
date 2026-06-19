@@ -17,6 +17,9 @@ struct ModelDescriptor: Decodable, Sendable, Identifiable, Equatable {
     let pipeline: PipelineShape
     let requiresAPIKey: Bool
     let available: Bool
+    /// 이 모델을 쓰기 위한 최소 macOS 버전(예 "26.0"). 누락/nil이면 OS 제약 없음(spec 007 §6).
+    /// 현재 OS가 미달이면 카탈로그/UI/팩토리가 "비활성(macOS N+ 필요)"으로 게이팅한다.
+    let minOS: String?
     let capabilities: Caps
     let vad: VADSupport
     let engineSlots: EngineSlots
@@ -49,6 +52,22 @@ struct ModelDescriptor: Decodable, Sendable, Identifiable, Equatable {
         case integrated
         case composed
     }
+
+    /// 현재 실행 중인 macOS가 `minOS`를 만족하는지(spec 007 §6). minOS=nil이면 항상 true.
+    /// "26.0"/"26"/"15.4" 같은 major[.minor[.patch]] 문자열을 파싱해
+    /// `ProcessInfo.isOperatingSystemAtLeast`로 비교한다(파싱 실패 시 보수적으로 true=제약 없음).
+    var isAvailableOnThisOS: Bool {
+        guard let minOS else { return true }
+        let parts = minOS.split(separator: ".").map { Int($0) ?? 0 }
+        guard let major = parts.first else { return true }
+        let minor = parts.count > 1 ? parts[1] : 0
+        let patch = parts.count > 2 ? parts[2] : 0
+        let version = OperatingSystemVersion(majorVersion: major, minorVersion: minor, patchVersion: patch)
+        return ProcessInfo.processInfo.isOperatingSystemAtLeast(version)
+    }
+
+    /// 카탈로그 available + 현재 OS 게이트를 합친 실제 사용 가능 여부(UI/팩토리 게이팅 진실값).
+    var effectiveAvailable: Bool { available && isAvailableOnThisOS }
 
     /// spec 004 `EngineCapabilities`로 사상(provider 능력 노출용).
     var engineCapabilities: EngineCapabilities {

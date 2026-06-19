@@ -187,6 +187,41 @@ final class SubtitleEngine {
         pendingGenerationReset = true
     }
 
+    // MARK: - 세그먼트(교체) 경로 (spec 007 §5 — STT/MT 엔진용)
+
+    /// STT/MT 같은 **세그먼트 엔진**용 수신 경로. delta append와 달리 현재 줄을 **교체**한다.
+    ///
+    /// SpeechTranscriber/Translation은 "현재 가설 전체(volatile)"를 반복 갱신하고 final로
+    /// 확정한다 → 누적-append가 아니라 매번 전체 텍스트를 set 한다. Gemini delta 경로
+    /// (`ingestTranslationDelta` 등)와 **완전히 별개**이며, 한 세션에서 둘이 섞이지 않는다
+    /// (엔진 종류가 둘 중 하나만 방출).
+    ///
+    /// - Parameters:
+    ///   - translation: 번역 세그먼트 전체. nil이면 번역 줄을 **유지**(원문만 갱신할 때).
+    ///   - source: 원문 세그먼트 전체. nil이면 원문 줄을 유지(번역만 갱신할 때).
+    ///   - isFinal: true면 확정 경계(`confirmTurn` 재사용 — hold/dedup/scheduleHide),
+    ///     false면 라이브 갱신만(current 교체 + isVisible 유지).
+    func ingestSegment(translation: String?, source: String?, isFinal: Bool) {
+        // 진단: 어떤 줄을 어떻게 갱신했는지(앞 40자/길이/확정 여부) — 교체 모델 추적용(텍스트, 키 아님).
+        log.debug("\(LogTag.subtitle, privacy: .public) segment: t=\"\((translation ?? "·").prefix(40), privacy: .public)\" s=\"\((source ?? "·").prefix(40), privacy: .public)\" final=\(isFinal, privacy: .public)")
+
+        // 세그먼트 경로는 delta 누적 모델의 generation-리셋 대기 플래그와 무관하다 — 잔재가 다음
+        // 교체에 끼어들지 않도록 명시적으로 false로 둔다(둘이 섞이지 않음 보장).
+        pendingGenerationReset = false
+
+        // current 버퍼를 append가 아니라 직접 교체(showPreview의 set 로직을 타이머 없이 차용).
+        if let translation { currentTranslation = translation }
+        if let source { currentSource = source }
+
+        if isFinal {
+            // 확정 경계: 기존 confirmTurn(dedup/hold/scheduleHide)을 재사용해 줄을 고정·페이드.
+            confirmTurn(reason: .turnComplete)
+        } else {
+            // 라이브 갱신: 보이게 하고 진행 중 숨김 타이머만 취소(문장이 계속 갱신 중).
+            showAndCancelHide()
+        }
+    }
+
     // MARK: - 고정 미리보기 (테스트 자막 토글)
 
     /// 테스트 자막 토글 ON: 페이드/확정 없이 **고정 표시**한다(슬라이더/스타일 변경 시 위치만 갱신).

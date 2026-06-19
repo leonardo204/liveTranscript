@@ -125,6 +125,10 @@ struct SettingsView: View {
         Form {
             modelSelectionSection
             modelInfoSection
+            // 소스(전사) 언어 — 조합형(onDeviceTranslate) 엔진일 때만 노출(spec 007 §6).
+            if appState.selectedModel.engine == .onDeviceTranslate {
+                sourceLanguageSection
+            }
             vadSection
             if appState.selectedModel.engineSlots.translation {
                 translationEngineSection
@@ -147,8 +151,9 @@ struct SettingsView: View {
                 }
             )) {
                 ForEach(ModelCatalog.shared.models) { model in
-                    Text(model.displayName + (model.available ? "" : " (준비 중)"))
+                    Text(model.displayName + Self.modelAvailabilitySuffix(model))
                         .tag(model.id)
+                        .disabled(!model.isAvailableOnThisOS)   // OS 미달 모델은 선택 불가(spec 007 §8).
                 }
             }
             .pickerStyle(.menu)
@@ -156,6 +161,16 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// 모델 표시명 뒤에 붙일 가용성 접미사(spec 007 §6/§8). OS 게이트가 available보다 우선.
+    /// - OS 미달: " (macOS N+ 필요)"  · available=false: " (준비 중)"  · 그 외: "".
+    private static func modelAvailabilitySuffix(_ model: ModelDescriptor) -> String {
+        if let minOS = model.minOS, !model.isAvailableOnThisOS {
+            return " (macOS \(minOS)+ 필요)"
+        }
+        if !model.available { return " (준비 중)" }
+        return ""
     }
 
     /// 모델 정보 Section. 선택 모델 summary + 능력 배지(텍스트).
@@ -234,6 +249,28 @@ struct SettingsView: View {
             }
             .pickerStyle(.menu)
             Text("번역 중 언어를 바꾸면 즉시 재연결되어 적용됩니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// 소스(전사) 언어 선택 Section — 조합형(onDeviceTranslate) 엔진 전용(spec 007 §6).
+    /// Apple Speech 전사 로케일 + Apple Translation source로 쓰인다. 변경 시 핫스왑.
+    private var sourceLanguageSection: some View {
+        Section("소스(전사) 언어") {
+            Picker("소스 언어", selection: Binding(
+                get: { appState.settings.sourceLanguageCode },
+                set: {
+                    appState.settings.sourceLanguageCode = $0
+                    appState.reloadTranslationSession()
+                }
+            )) {
+                ForEach(Self.languageOptions, id: \.code) { opt in
+                    Text(opt.label).tag(opt.code)
+                }
+            }
+            .pickerStyle(.menu)
+            Text("온디바이스 전사(STT)가 인식할 원문 언어입니다. 번역 대상 언어는 '번역' 설정에서 고릅니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

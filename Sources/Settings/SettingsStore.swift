@@ -47,6 +47,8 @@ final class SettingsStore {
         static let monitorFrameY = "monitor.frame.y"
         static let monitorHasSavedPosition = "monitor.hasSavedPosition"
         static let targetLanguageCode = "translate.targetLanguageCode"
+        // 소스(전사) 언어 코드 — 조합형(STT) 엔진 전용(spec 007 §6)
+        static let sourceLanguageCode = "translate.sourceLanguageCode"
         static let showSourceText = "translate.showSourceText"
         // 선택된 모델 카탈로그 id (spec 005 §4)
         static let selectedModelID = "model.selectedID"
@@ -128,6 +130,8 @@ final class SettingsStore {
             Key.costHUDEnabled: true,
             // 선택 모델 기본값(첫 모델 id) — 카탈로그 진실원과 일치(spec 005 §4).
             Key.selectedModelID: SettingsStore.defaultModelID,
+            // 소스(전사) 언어 기본값(조합형 STT 엔진용, spec 007 §6).
+            Key.sourceLanguageCode: SettingsStore.defaultSourceLanguageCode,
             // 자막 스타일 기본값(M4, FR-7).
             Key.subtitleFontName: StyleDefault.fontName,
             Key.subtitleFontSize: StyleDefault.fontSize,
@@ -153,6 +157,8 @@ final class SettingsStore {
         self.monitorHideOnStop = defaults.bool(forKey: Key.monitorHideOnStop)
         self.targetLanguageCode =
             defaults.string(forKey: Key.targetLanguageCode) ?? AppConfig.defaultTargetLanguageCode
+        self.sourceLanguageCode =
+            defaults.string(forKey: Key.sourceLanguageCode) ?? SettingsStore.defaultSourceLanguageCode
         self.showSourceText = defaults.bool(forKey: Key.showSourceText)
         self.selectedModelID =
             defaults.string(forKey: Key.selectedModelID) ?? SettingsStore.defaultModelID
@@ -491,6 +497,18 @@ final class SettingsStore {
         }
     }
 
+    /// 소스(전사) 언어 기본값(BCP-47). 조합형 STT 엔진의 전사 로케일 + 번역 source.
+    static let defaultSourceLanguageCode = "en"
+
+    /// 소스(전사) 언어 코드(BCP-47, 기본 "en"). 조합형(onDeviceTranslate) 엔진 전용(spec 007 §6).
+    /// 전사 로케일 + 번역 source로 쓰인다. 변경 시 AppState가 핫스왑(번역 중)/다음 시작에 반영.
+    var sourceLanguageCode: String {
+        didSet {
+            defaults.set(sourceLanguageCode, forKey: Key.sourceLanguageCode)
+            log.info("\(LogTag.settings, privacy: .public) change — sourceLanguageCode: \(oldValue, privacy: .public) → \(self.sourceLanguageCode, privacy: .public)")
+        }
+    }
+
     /// 원문 동시 표시(FR-8, 기본 OFF — 번역만). HUD/메뉴 공통 참조.
     var showSourceText: Bool {
         didSet {
@@ -569,7 +587,7 @@ final class SettingsStore {
         let allKeys = [
             Key.monitorEnabled, Key.monitorAutoShowOnCapture, Key.monitorHideOnStop,
             Key.monitorFrameX, Key.monitorFrameY, Key.monitorHasSavedPosition,
-            Key.targetLanguageCode, Key.showSourceText, Key.selectedModelID,
+            Key.targetLanguageCode, Key.sourceLanguageCode, Key.showSourceText, Key.selectedModelID,
             Key.inputSelectionKind, Key.inputSelectionDeviceUID,
             Key.subtitleMaxCharsBeforeBreak,
             Key.costHUDEnabled, Key.costCumulativeInputUSD, Key.costCumulativeOutputUSD,
@@ -596,6 +614,7 @@ final class SettingsStore {
         monitorAutoShowOnCapture = true
         monitorHideOnStop = true
         targetLanguageCode = AppConfig.defaultTargetLanguageCode
+        sourceLanguageCode = SettingsStore.defaultSourceLanguageCode
         showSourceText = false
         selectedModelID = SettingsStore.defaultModelID
         subtitleMaxCharsBeforeBreak = AppConfig.defaultMaxCharsBeforeBreak

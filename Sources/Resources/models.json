@@ -20,6 +20,27 @@
       "engineSlots": { "translation": false, "llm": false },
       "targetLanguages": null,
       "sourceLanguages": null
+    },
+    {
+      "id": "apple-offline-translate",
+      "displayName": "오프라인 번역 (Apple)",
+      "summary": "온디바이스 Apple Speech 전사 + Apple 번역. 키 불필요. macOS 26+ 필요.",
+      "engine": "onDeviceTranslate",
+      "modelIdentifier": "apple.speech+translation",
+      "pipeline": "composed",
+      "requiresAPIKey": false,
+      "available": true,
+      "minOS": "26.0",
+      "capabilities": {
+        "sourceText": true,
+        "translatedText": true,
+        "translatedAudio": false,
+        "streaming": true
+      },
+      "vad": { "server": false, "clientGate": true, "default": "client" },
+      "engineSlots": { "translation": false, "llm": false },
+      "targetLanguages": null,
+      "sourceLanguages": null
     }
   ]
 }
