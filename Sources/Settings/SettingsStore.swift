@@ -56,6 +56,7 @@ final class SettingsStore {
         // 자막 HUD 위치 (M3)
         static let subtitleScreenID = "subtitle.screenID"
         static let subtitleVerticalPosition = "subtitle.verticalPosition"
+        static let subtitleVerticalOffset = "subtitle.verticalOffset"
         static let subtitleAutoShowOnCapture = "subtitle.autoShowOnCapture"
         // 자막 스타일 (M4, FR-7) — 색은 sRGB "#RRGGBBAA" 문자열로 영속.
         static let subtitleFontName = "subtitle.style.fontName"
@@ -112,6 +113,8 @@ final class SettingsStore {
             Key.monitorAutoShowOnCapture: true,
             Key.monitorHideOnStop: true,
             Key.subtitleVerticalPosition: SubtitleVerticalPosition.bottom.rawValue,
+            // 영역(상/중/하) 내 세부 세로 위치 기본값 0.5(영역 중간). register로 0 충돌 방지.
+            Key.subtitleVerticalOffset: 0.5,
             Key.subtitleAutoShowOnCapture: true,
             // 자막 2줄 분량 휴리스틱 기본값(번역 텍스트 기준 누적 글자수). 한국어 자막 ~2줄.
             Key.subtitleMaxCharsBeforeBreak: AppConfig.defaultMaxCharsBeforeBreak,
@@ -148,6 +151,7 @@ final class SettingsStore {
             SubtitleVerticalPosition(
                 rawValue: defaults.string(forKey: Key.subtitleVerticalPosition) ?? ""
             ) ?? .bottom
+        self.subtitleVerticalOffset = defaults.double(forKey: Key.subtitleVerticalOffset)
         self.subtitleAutoShowOnCapture = defaults.bool(forKey: Key.subtitleAutoShowOnCapture)
         self.subtitleMaxCharsBeforeBreak = defaults.integer(forKey: Key.subtitleMaxCharsBeforeBreak)
         self.costHUDEnabled = defaults.bool(forKey: Key.costHUDEnabled)
@@ -271,6 +275,19 @@ final class SettingsStore {
     var subtitleVerticalPosition: SubtitleVerticalPosition {
         didSet {
             defaults.set(subtitleVerticalPosition.rawValue, forKey: Key.subtitleVerticalPosition)
+        }
+    }
+
+    /// 선택한 영역(상/중/하) 안에서의 세부 세로 위치(0=영역 위, 1=영역 아래, 기본 0.5).
+    /// 0~1로 클램프해 저장한다. 오버레이 뷰가 영역 밴드와 결합해 박스 위치를 계산한다.
+    var subtitleVerticalOffset: Double {
+        didSet {
+            let clamped = min(1.0, max(0.0, subtitleVerticalOffset))
+            if clamped != subtitleVerticalOffset {
+                subtitleVerticalOffset = clamped
+                return  // 재대입이 didSet을 다시 호출하므로 여기서 종료.
+            }
+            defaults.set(subtitleVerticalOffset, forKey: Key.subtitleVerticalOffset)
         }
     }
 
@@ -493,7 +510,8 @@ final class SettingsStore {
             Key.inputSelectionKind, Key.inputSelectionDeviceUID,
             Key.subtitleMaxCharsBeforeBreak,
             Key.costHUDEnabled, Key.costCumulativeInputUSD, Key.costCumulativeOutputUSD,
-            Key.subtitleScreenID, Key.subtitleVerticalPosition, Key.subtitleAutoShowOnCapture,
+            Key.subtitleScreenID, Key.subtitleVerticalPosition, Key.subtitleVerticalOffset,
+            Key.subtitleAutoShowOnCapture,
             Key.subtitleFontName, Key.subtitleFontSize, Key.subtitleFontWeight,
             Key.subtitleTextColor, Key.subtitleStrokeEnabled, Key.subtitleStrokeColor,
             Key.subtitleGlowEnabled, Key.subtitleGlowColor, Key.subtitleGlowRadius,
@@ -519,6 +537,7 @@ final class SettingsStore {
         subtitleMaxCharsBeforeBreak = AppConfig.defaultMaxCharsBeforeBreak
         costHUDEnabled = true
         subtitleVerticalPosition = .bottom
+        subtitleVerticalOffset = 0.5
         subtitleAutoShowOnCapture = true
         // 자막 스타일은 기존 전용 리셋 경로를 재사용(색 hex 3개 포함).
         resetSubtitleStyle()

@@ -68,28 +68,17 @@ final class SubtitleOverlayController {
     private func makeWindow() -> SubtitleOverlayWindow {
         let rect = targetScreen()?.frame ?? NSRect(x: 0, y: 0, width: 800, height: 200)
         let window = SubtitleOverlayWindow(contentRect: rect)
-        window.setContent(
-            SubtitleOverlayView(
-                engine: engine,
-                settings: settings,
-                verticalPosition: settings.subtitleVerticalPosition
-            )
-        )
+        // 콘텐츠는 1회만 생성한다. 세로 위치/오프셋/스타일은 뷰가 @Observable settings에서
+        // 직접 읽어 실시간 반영하므로(호스팅 뷰 재생성 불필요), 슬라이더 드래그도 즉시 이동한다.
+        window.setContent(SubtitleOverlayView(engine: engine, settings: settings))
         return window
     }
 
-    /// 선택된 화면 전체를 덮도록 창 프레임을 설정하고, 세로 위치를 뷰에 반영한다.
+    /// 선택된 화면(모니터)으로 창 프레임만 갱신한다. 세로 위치/오프셋은 뷰가 settings를
+    /// 직접 관찰해 반영하므로 콘텐츠를 재생성하지 않는다(매 슬라이더 틱 recreate 제거 → 부드러운 이동).
     private func reposition(_ window: SubtitleOverlayWindow) {
         guard let screen = targetScreen() else { return }
         window.setFrame(screen.frame, display: true)
-        // 세로 위치는 뷰가 처리하므로 콘텐츠를 갱신해 최신 설정을 반영한다.
-        window.setContent(
-            SubtitleOverlayView(
-                engine: engine,
-                settings: settings,
-                verticalPosition: settings.subtitleVerticalPosition
-            )
-        )
     }
 
     /// 설정된 모니터를 찾는다. 없거나 분리됐으면 주 화면으로 폴백(합리적 폴백).

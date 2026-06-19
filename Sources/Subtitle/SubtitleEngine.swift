@@ -187,6 +187,32 @@ final class SubtitleEngine {
         pendingGenerationReset = true
     }
 
+    // MARK: - 고정 미리보기 (테스트 자막 토글)
+
+    /// 테스트 자막 토글 ON: 페이드/확정 없이 **고정 표시**한다(슬라이더/스타일 변경 시 위치만 갱신).
+    ///
+    /// 일반 ingest 경로와 달리 hold/silence 타이머를 일절 걸지 않아 자동으로 사라지지 않는다.
+    /// current와 confirmed를 동일하게 채워, 어느 표시 경로(displayTranslation/displaySource)에서도
+    /// 빈 버퍼로 인해 자막이 사라지지 않게 한다. generation 리셋 대기 플래그도 false로 둔다.
+    func showPreview(translation: String, source: String?) {
+        // 진행 중일 수 있는 모든 타이머를 취소(자동 확정/페이드 예약 차단).
+        hideTask?.cancel(); hideTask = nil
+        silenceTask?.cancel(); silenceTask = nil
+        let src = source ?? ""
+        currentTranslation = translation
+        currentSource = src
+        confirmedTranslation = translation
+        confirmedSource = src
+        pendingGenerationReset = false
+        isVisible = true
+        log.debug("showPreview: 고정 미리보기 표시(타이머 없음)")
+    }
+
+    /// 테스트 자막 토글 OFF: 미리보기 텍스트를 비우고 즉시 숨긴다(reset과 동일 경로).
+    func hidePreview() {
+        reset()
+    }
+
     /// 세션 정지/재시작 시 누적 텍스트를 비우고 즉시 숨긴다.
     func reset() {
         // A3: 세션 재시작 폭주 여부 확인용(짧은 간격으로 반복되면 재연결 storm 신호).

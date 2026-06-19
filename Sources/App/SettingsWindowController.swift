@@ -57,5 +57,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     // 창을 닫으면 다시 accessory로 — Dock 아이콘 상시 노출 방지.
     func windowWillClose(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // 설정 창을 닫으면 테스트 자막(고정 미리보기)도 함께 끈다(잔류 미리보기 방지).
+        appState.setTestSubtitle(false)
     }
 }

@@ -305,6 +305,26 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
 
+            // 영역(상/중/하) 안에서의 세부 세로 위치(0=위, 1=아래) 미세 조정.
+            VStack(alignment: .leading) {
+                Slider(value: Binding(
+                    get: { settings.subtitleVerticalOffset },
+                    set: {
+                        settings.subtitleVerticalOffset = $0
+                        appState.subtitleOverlay.applyPositionChange()
+                    }
+                ), in: 0...1) {
+                    Text("세부 위치")
+                } minimumValueLabel: {
+                    Text("위")
+                } maximumValueLabel: {
+                    Text("아래")
+                }
+                Text("선택한 영역(상/중/하) 안에서 자막을 위↔아래로 미세 조정합니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Toggle("캡처 시작 시 자막 표시", isOn: Binding(
                 get: { settings.subtitleAutoShowOnCapture },
                 set: { settings.subtitleAutoShowOnCapture = $0 }
@@ -315,15 +335,16 @@ struct SettingsView: View {
                 set: { settings.showSourceText = $0 }
             ))
 
-            HStack {
-                Button("화면 목록 새로고침") { refreshScreens() }
-                Spacer()
-                // 캡처 중 자막은 기본 표시되므로 토글 대신, 현재 스타일/위치를 실제
-                // 오버레이에 샘플 자막으로 띄워 화면에서 바로 확인한다(2초 후 페이드).
-                // 번역 중에는 실자막을 덮어쓰지 않도록 비활성화한다.
-                Button("테스트 자막 표시") { appState.showTestSubtitle() }
-                    .disabled(appState.isRunning)
-            }
+            // 테스트 자막: 토글 ON 동안 샘플 자막을 오버레이에 고정 표시한다(페이드 없음).
+            // 이 상태에서 위 세부위치/세로위치/스타일을 바꾸면 실시간으로 따라 이동/갱신된다.
+            // 번역 중에는 실자막을 덮어쓰지 않도록 비활성화한다.
+            Toggle("테스트 자막 표시", isOn: Binding(
+                get: { appState.isTestSubtitleOn },
+                set: { appState.setTestSubtitle($0) }
+            ))
+            .disabled(appState.isRunning)
+
+            Button("화면 목록 새로고침") { refreshScreens() }
 
             if appState.isRunning {
                 Text("번역 정지 상태에서만 미리볼 수 있습니다.")

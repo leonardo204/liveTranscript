@@ -14,6 +14,10 @@ final class AppState {
     /// 번역 세션 실행 중 여부. M1a부터 실제 오디오 캡처 상태와 연동된다.
     var isRunning: Bool = false
 
+    /// 테스트 자막(고정 미리보기) 토글 상태. 번역 정지 상태에서만 ON 가능하며,
+    /// ON 동안 자막 오버레이에 샘플 자막을 고정 표시해 위치/스타일을 실시간으로 미리본다.
+    private(set) var isTestSubtitleOn: Bool = false
+
     /// API 키 로드 성공 여부. 메뉴바에 상태로 표시된다.
     private(set) var apiKeyLoaded: Bool = false
 
@@ -330,6 +334,9 @@ final class AppState {
     /// 번역 세션을 깨끗하게 시작한다(직렬 reconciler가 호출). 항상 새 audio + 새 Gemini + 자막 정책 on.
     private func performStart() async {
         log.info("performStart 진입")
+        // 테스트 자막(고정 미리보기)이 켜져 있으면 끈다 — 실제 자막으로 전환.
+        // (startGemini가 subtitles.reset()을 호출하므로 추가 자막 정리는 불필요. 토글 상태만 내린다.)
+        if isTestSubtitleOn { isTestSubtitleOn = false }
         // 사용자 피드백: 키 유무와 무관하게 "시작"을 누르면 제어 HUD는 떠야 한다.
         // 마스터 토글이 꺼져 있어도 강제로 켜고 표시한다.
         settings.monitorEnabled = true
@@ -598,17 +605,25 @@ final class AppState {
 
     // MARK: - 미리보기/리셋 (설정 UI)
 
-    /// 자막 오버레이를 강제로 표시하고 샘플 자막을 주입해 실제 화면 렌더를 미리본다.
-    func showTestSubtitle() {
-        // 캡처/번역 중에는 실제 자막을 덮어쓰지 않도록 미리보기를 막는다(실자막 보존).
-        guard !isRunning else { return }
-        subtitleOverlay.show()
-        subtitles.reset()
-        subtitles.ingestTranslationDelta("안녕하세요 — 자막 미리보기입니다")
-        if settings.showSourceText {
-            subtitles.ingestSourceDelta("Hello — this is a subtitle preview")
+    /// 테스트 자막(고정 미리보기) 토글을 켜고 끈다(설정 UI의 토글이 호출).
+    /// ON: 번역 정지 상태에서만 동작하며 샘플 자막을 오버레이에 고정 표시한다(페이드 없음).
+    /// 이 상태에서 세부위치/세로위치/스타일을 바꾸면 오버레이가 실시간으로 따라 갱신된다.
+    /// OFF: 미리보기를 숨긴다.
+    func setTestSubtitle(_ on: Bool) {
+        if on {
+            // 번역 중에는 실제 자막을 덮어쓰지 않도록 미리보기를 막는다(실자막 보존).
+            guard !isRunning else { return }
+            isTestSubtitleOn = true
+            subtitleOverlay.show()
+            subtitles.showPreview(
+                translation: "안녕하세요 — 자막 미리보기입니다",
+                source: settings.showSourceText ? "Hello — subtitle preview" : nil
+            )
+        } else {
+            isTestSubtitleOn = false
+            subtitles.hidePreview()
+            subtitleOverlay.applyCapturePolicy(isCapturing: false)
         }
-        subtitles.ingestTurnComplete()  // 2초 유지 후 자동 페이드
     }
 
     /// 모든 사용자 설정을 기본값으로 되돌리고 시각/오디오 정책을 재적용한다.
