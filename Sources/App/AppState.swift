@@ -199,7 +199,7 @@ final class AppState {
         }
         do {
             try provider.save(trimmed)
-            log.info("saveAPIKey 성공(키 미포함) → reloadTranslationSession 호출")
+            log.info("\(LogTag.appState, privacy: .public) saveAPIKey 성공(키 미포함) → reloadTranslationSession 호출")
             refreshKeyState()
             // 저장하면 직전 테스트 결과는 무의미 — 초기화.
             connectionTestState = .idle
@@ -207,7 +207,7 @@ final class AppState {
             reloadTranslationSession()
             return .success(())
         } catch {
-            log.error("saveAPIKey 실패(키 미포함): \(error.localizedDescription, privacy: .public)")
+            log.error("\(LogTag.appState, privacy: .public) saveAPIKey 실패(키 미포함): \(error.localizedDescription, privacy: .public)")
             return .failure(error)
         }
     }
@@ -220,14 +220,14 @@ final class AppState {
         }
         do {
             try provider.clear()
-            log.info("clearAPIKey 성공 → reloadTranslationSession 호출")
+            log.info("\(LogTag.appState, privacy: .public) clearAPIKey 성공 → reloadTranslationSession 호출")
             refreshKeyState()
             connectionTestState = .idle
             // 번역 중에 키를 지우면 재연결 시 키가 없어 performProviderSwap이 정지로 수렴한다(정지 중이면 무시).
             reloadTranslationSession()
             return .success(())
         } catch {
-            log.error("clearAPIKey 실패: \(error.localizedDescription, privacy: .public)")
+            log.error("\(LogTag.appState, privacy: .public) clearAPIKey 실패: \(error.localizedDescription, privacy: .public)")
             return .failure(error)
         }
     }
@@ -266,6 +266,9 @@ final class AppState {
         apiKeyLoaded = apiKeyProvider.geminiAPIKey() != nil
         keySource = resolvedProvider?.currentKeySource()
             ?? (apiKeyLoaded ? .keychain : .none)
+        // 키 상태 변화 체크포인트(spec 006 §4.8). 값은 비노출 — 출처/존재 여부만.
+        let sourceLabel = (keySource == .keychain) ? "keychain" : "none"
+        log.info("\(LogTag.settings, privacy: .public) key — source=\(sourceLabel, privacy: .public) present=\(self.apiKeyLoaded, privacy: .public)")
         // 저장/삭제 직후 stale 상태 라벨 제거: 실행 중이 아니면 키 보유 여부로 라벨을 재설정.
         if !isRunning {
             geminiStatus = apiKeyLoaded
@@ -282,7 +285,7 @@ final class AppState {
         // 빠른 연타에도 의도만 즉시 뒤집고 isRunning(버튼 상태)에 미러한다.
         // 실제 파이프라인 전환은 reconciler가 직렬로 수렴시킨다(겹침/좀비 없음).
         desiredRunning.toggle()
-        log.info("의도 토글: desired=\(self.desiredRunning, privacy: .public)")
+        log.info("\(LogTag.appState, privacy: .public) start/stop requested — desired=\(self.desiredRunning, privacy: .public)")
         isRunning = desiredRunning   // 버튼 상태 즉시 반영(연타에도 UI는 항상 최신 의도)
         kickReconcile()
     }
@@ -291,12 +294,12 @@ final class AppState {
     /// 정지 중이면 무시(다음 시작에 자연 반영). (Run 3에서 키/언어 변경 경로가 배선 예정.)
     func reloadTranslationSession() {
         guard desiredRunning else {
-            log.info("reloadTranslationSession: 무시(desiredRunning=false — 다음 시작에 자연 반영)")
+            log.info("\(LogTag.appState, privacy: .public) reloadTranslationSession: 무시(desiredRunning=false — 다음 시작에 자연 반영)")
             return
         }
         // 구성(언어/키/엔진/원문표시) 변경 가능성 → reconciler가 actualConfig와 비교해
         // 실제 달라졌을 때만 핫스왑한다(불변 변경이면 no-op). spec 004 §7.8.
-        log.info("reloadTranslationSession: 구성 재평가 요청(desiredRunning=true) → kickReconcile")
+        log.info("\(LogTag.appState, privacy: .public) reloadTranslationSession: 구성 재평가 요청(desiredRunning=true) → kickReconcile")
         kickReconcile()
     }
 
@@ -351,13 +354,13 @@ final class AppState {
             // 진단: 매 반복의 desired/actual/구성변경 여부 + 선택 분기(상태머신 추적).
             let cfgChanged = actualConfig != currentDesiredConfig()
             if desiredRunning && !actualRunning {
-                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) → performStart")
+                log.info("\(LogTag.reconcile, privacy: .public) step — desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) → performStart")
                 await performStart()
             } else if !desiredRunning && actualRunning {
-                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) → performStop")
+                log.info("\(LogTag.reconcile, privacy: .public) step — desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) → performStop")
                 await performStop()
             } else if desiredRunning && actualRunning && cfgChanged {
-                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) cfgChanged=true → performProviderSwap(핫스왑)")
+                log.info("\(LogTag.reconcile, privacy: .public) step — desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) cfgChanged=true → performProviderSwap(핫스왑)")
                 await performProviderSwap()
             } else {
                 break
@@ -375,7 +378,7 @@ final class AppState {
 
     /// 번역 세션을 깨끗하게 시작한다(직렬 reconciler가 호출). 항상 새 audio + 새 Gemini + 자막 정책 on.
     private func performStart() async {
-        log.info("performStart 진입")
+        log.info("\(LogTag.appState, privacy: .public) performStart 진입")
         // 테스트 자막(고정 미리보기)이 켜져 있으면 끈다 — 실제 자막으로 전환.
         // (startGemini가 subtitles.reset()을 호출하므로 추가 자막 정리는 불필요. 토글 상태만 내린다.)
         if isTestSubtitleOn { isTestSubtitleOn = false }
@@ -387,7 +390,7 @@ final class AppState {
 
         // 키가 없으면 캡처/연결을 시작하지 않고, 의도를 정지로 되돌려 버튼이 "시작"으로 유지되게 한다.
         guard let key = geminiAPIKey(), !key.isEmpty else {
-            log.error("performStart 중단: 키 없음 → 의도 정지로 복귀")
+            log.error("\(LogTag.appState, privacy: .public) performStart 중단: 키 없음 → 의도 정지로 복귀")
             geminiStatus = "API 키 없음 — 설정에서 Gemini API 키를 입력하세요"
             desiredRunning = false
             isRunning = false
@@ -395,11 +398,13 @@ final class AppState {
             actualConfig = nil
             return
         }
-        log.info("performStart: 키 있음 → 캡처+Gemini 시작")
+        // 해석된 config 1줄(spec 006 §3/§4.4): 추상→하위 계층 추적의 AppState 라인. 키는 present만.
+        logConfigResolved()
+        log.info("\(LogTag.appState, privacy: .public) performStart: 키 있음 → 캡처+Gemini 시작")
         lastFailureReason = nil   // 새 세션 시작 → 직전 영구 실패 사유 클리어(정지 라벨 오염 방지)
         // 미지원 엔진(준비 중)이면 캡처를 시작하지 않고 의도를 정지로 되돌려 안전 수렴한다(spec 005 §4).
         guard startGemini(apiKey: key) else {
-            log.error("performStart 중단: 모델 엔진 미지원 → 의도 정지로 복귀")
+            log.error("\(LogTag.appState, privacy: .public) performStart 중단: 모델 엔진 미지원 → 의도 정지로 복귀")
             desiredRunning = false
             isRunning = false
             actualRunning = false
@@ -415,14 +420,21 @@ final class AppState {
         applyAudioOutputPolicy()
         actualConfig = currentDesiredConfig()   // 가동 구성 스냅샷(이후 핫스왑 판정 기준)
         actualRunning = true
-        log.info("performStart 완료: actualRunning=true")
+        log.info("\(LogTag.appState, privacy: .public) performStart done — actualRunning=true")
+    }
+
+    /// 해석된 세션 config를 1줄로 로그한다(spec 006 §3/§4.4). performStart/performProviderSwap 공용.
+    /// 키는 평문/지문 없이 present만 노출(키가 없으면 호출되지 않는 경로에서만 사용).
+    private func logConfigResolved() {
+        let model = selectedModel
+        log.info("\(LogTag.appState, privacy: .public) config resolved — model=\(self.settings.selectedModelID, privacy: .public) engine=\(model.engine.rawValue, privacy: .public) lang=\(self.settings.targetLanguageCode, privacy: .public) showSource=\(self.settings.showSourceText, privacy: .public) playback=\(self.settings.translatedAudioPlaybackEnabled, privacy: .public) vad=\(self.audio.vadEnabled ? "client" : "server", privacy: .public) key=present")
     }
 
     /// 번역 세션을 확실히 정지한다(직렬 reconciler가 호출). audio + Gemini + 자막 오버레이 모두 내려간다.
     /// **이전 Gemini client.stop()이 끝날 때까지 await**한 뒤에만 actualRunning=false로 만들어,
     /// 다음 시작이 이전 세션과 겹치지 않게 보장한다.
     private func performStop() async {
-        log.info("performStop 진입")
+        log.info("\(LogTag.appState, privacy: .public) performStop 진입")
         audio.stop()
         await stopGemini()   // ← fire-and-forget 금지: provider.stop() 완료까지 대기(좀비/중복 방지)
         subtitleOverlay.applyCapturePolicy(isCapturing: false)
@@ -437,20 +449,20 @@ final class AppState {
         }
         actualRunning = false
         actualConfig = nil
-        log.info("performStop 완료: actualRunning=false")
+        log.info("\(LogTag.appState, privacy: .public) performStop done — actualRunning=false")
     }
 
     /// 구성(엔진/언어/키/원문표시) 변경 시 **캡처(audio)는 유지**한 채 provider만 안전 교체한다(핫스왑).
     /// 입력 오디오는 엔진 무관 공유 자원이라 끊지 않는다(권한 재요청 없음). spec 004 §7.6/§7.8.
     /// 이전 provider.stop()을 끝까지 await한 뒤(무중첩) 새 구성으로 재시작. 키가 없으면 정지로 수렴.
     private func performProviderSwap() async {
-        log.info("performProviderSwap 진입")
+        log.info("\(LogTag.appState, privacy: .public) performProviderSwap 진입")
         await stopGemini()   // 이전 provider 완전 정지까지 대기(무중첩 — 불변식 4)
         // 핫스왑 위생(spec 004 §7.13): 이전 generation/언어로 합성된 잔여 PCM이 새 provider
         // 연결 직후 잠깐 재생되지 않도록 출력 큐를 비운다(.interrupted/.generationComplete와 일관).
         translatedAudioPlayer.flush()
         guard let key = geminiAPIKey(), !key.isEmpty else {
-            log.error("performProviderSwap 중단: 키 없음 → 정지로 수렴")
+            log.error("\(LogTag.appState, privacy: .public) performProviderSwap 중단: 키 없음 → 정지로 수렴")
             geminiStatus = "API 키 없음 — 설정에서 Gemini API 키를 입력하세요"
             desiredRunning = false
             isRunning = false
@@ -462,10 +474,12 @@ final class AppState {
             systemAudioDucker.restore()
             return
         }
-        log.info("performProviderSwap: 키 있음 → provider 재시작(새 구성)")
+        // 해석된 config 1줄(spec 006 §3 — 핫스왑도 각 레이어가 자기 줄을 남긴다).
+        logConfigResolved()
+        log.info("\(LogTag.appState, privacy: .public) performProviderSwap: 키 있음 → provider 재시작(새 구성)")
         // 미지원 엔진으로 핫스왑되면 정지로 수렴한다(캡처도 다음 performStop이 내림).
         guard startGemini(apiKey: key) else {
-            log.error("performProviderSwap 중단: 모델 엔진 미지원 → 정지로 수렴")
+            log.error("\(LogTag.appState, privacy: .public) performProviderSwap 중단: 모델 엔진 미지원 → 정지로 수렴")
             desiredRunning = false
             isRunning = false
             actualConfig = nil
@@ -476,7 +490,7 @@ final class AppState {
         // 자막/오디오 정책은 그대로 유지(캡처는 끊기지 않았다).
         applyAudioOutputPolicy()
         actualConfig = currentDesiredConfig()   // 교체 후 구성 스냅샷 갱신
-        log.info("performProviderSwap 완료")
+        log.info("\(LogTag.appState, privacy: .public) performProviderSwap done")
     }
 
     // MARK: - Gemini 수명주기 (M2a)
@@ -496,7 +510,7 @@ final class AppState {
 
         // 미지원 엔진(spec 005: onDevice* — 팩토리 nil)이면 캡처/연결을 시작하지 않고 false 반환.
         guard let provider = providerFactory.make(settings: settings, apiKey: apiKey) else {
-            log.error("startGemini 중단: 선택 모델 엔진 미지원(준비 중) → false 반환")
+            log.error("\(LogTag.appState, privacy: .public) startGemini 중단: 선택 모델 엔진 미지원(준비 중) → false 반환")
             geminiStatus = "이 모델은 아직 준비 중입니다"
             return false
         }
@@ -567,13 +581,13 @@ final class AppState {
         switch event {
         case .state(let state):
             switch state {
-            case .idle: geminiStatus = "연결 안 됨"; log.info("event.state=disconnected")
-            case .preparing: geminiStatus = "연결 중…"; log.info("event.state=connecting")
-            case .ready: geminiStatus = "번역 중"; log.info("event.state=ready")
-            case .reconnecting: geminiStatus = "연결 중…"; log.info("event.state=connecting")
+            case .idle: geminiStatus = "연결 안 됨"; log.info("\(LogTag.appState, privacy: .public) event.state=disconnected")
+            case .preparing: geminiStatus = "연결 중…"; log.info("\(LogTag.appState, privacy: .public) event.state=connecting")
+            case .ready: geminiStatus = "번역 중"; log.info("\(LogTag.appState, privacy: .public) event.state=ready")
+            case .reconnecting: geminiStatus = "연결 중…"; log.info("\(LogTag.appState, privacy: .public) event.state=connecting")
             case .error(let message):
                 geminiStatus = message  // 키 미포함(클라이언트가 보장)
-                log.error("event.state=error: \(message, privacy: .public)")
+                log.error("\(LogTag.appState, privacy: .public) event.state=error: \(message, privacy: .public)")
             }
         case .translatedText(let delta):
             subtitles.ingestTranslationDelta(delta)
@@ -585,7 +599,7 @@ final class AppState {
             // generation(재번역 단위) 경계: 자막은 다음 delta에서 직전 generation을 리셋하도록 표시한다.
             // 오디오는 직전 generation의 아직 재생 안 된 큐를 비워(flush), 다음 generation이 같은
             // 구간을 다시 말할 때 중첩 반복되는 것을 완화한다(flush는 큐만 비우고 재생은 지속).
-            log.info("event.generationComplete → 자막 generation 경계 + 오디오 flush")
+            log.info("\(LogTag.appState, privacy: .public) event.generationComplete → 자막 generation 경계 + 오디오 flush")
             subtitles.ingestGenerationComplete()
             translatedAudioPlayer.flush()
         case .usage(let metric):
@@ -593,7 +607,7 @@ final class AppState {
             case .sentAudio(let sampleCount):
                 cost.addSentAudio(sampleCount: sampleCount)   // 입력 비용 누적(태스크 C).
             case .outputAudioTokens(let tokens):
-                log.debug("event.outputTokens=\(tokens, privacy: .public) (비용 누적)")
+                log.debug("\(LogTag.appState, privacy: .public) event.outputTokens=\(tokens, privacy: .public) (비용 누적)")
                 cost.addOutputTokens(tokens)                  // 출력 비용 누적(태스크 C).
             case .localCompute:
                 break   // P0 미사용(온디바이스 스테이지 비용 — P1+).
@@ -602,22 +616,22 @@ final class AppState {
             // A2: enqueue 도달 여부 추적(첫 1회 + N회마다). 바이트수만 로그(데이터 내용 미포함).
             outputAudioEnqueueCount += 1
             if outputAudioEnqueueCount == 1 || outputAudioEnqueueCount % 50 == 0 {
-                log.debug("outputAudio enqueue (\(data.count) bytes)")
+                log.debug("\(LogTag.appState, privacy: .public) outputAudio enqueue (\(data.count) bytes)")
             }
             translatedAudioPlayer.enqueue(int16LE: data)  // 번역 출력 오디오 재생(M3+).
         case .info(let message):
-            log.info("event.info: \(message, privacy: .public)")
+            log.info("\(LogTag.appState, privacy: .public) event.info: \(message, privacy: .public)")
             geminiStatus = message
         case .interrupted:
             // 서버가 진행 중 응답을 인터럽트 → 진행 중 자막/번역 오디오를 즉시 정리한다.
             // 끊긴 응답의 잔재(자막 누적/스케줄된 오디오)가 다음 발화에 섞이지 않도록 한다.
-            log.info("event.interrupted → 진행 중 자막/오디오 정리")
+            log.info("\(LogTag.appState, privacy: .public) event.interrupted → 진행 중 자막/오디오 정리")
             subtitles.reset()
             translatedAudioPlayer.flush()
         case .permanentFailure(let reason):
             // 영구 실패 → 의도를 정지로 돌리고 reconciler에 정리를 맡긴다(직렬 안전).
             // reconciler가 performStop으로 player/ducker/audio/gemini를 한 번에 정리한다.
-            log.error("permanentFailure → 세션 정지: \(reason, privacy: .public)")
+            log.error("\(LogTag.appState, privacy: .public) permanentFailure → 세션 정지: \(reason, privacy: .public)")
             desiredRunning = false
             isRunning = false
             lastFailureReason = reason   // performStop이 정지 라벨을 덮을 때 이 사유를 우선 노출
@@ -651,10 +665,10 @@ final class AppState {
     /// 덕킹을 켜면 원문과 함께 번역 소리도 같이 작아진다(별도 출력 라우팅은 미지원).
     func applyAudioOutputPolicy() {
         // A2: 호출 진입 + 분기 추적(오디오 정책 thrash 원인 확정용).
-        log.info("applyAudioOutputPolicy: playback=\(self.settings.translatedAudioPlaybackEnabled) isRunning=\(self.isRunning)")
+        log.info("\(LogTag.appState, privacy: .public) applyAudioOutputPolicy: playback=\(self.settings.translatedAudioPlaybackEnabled) isRunning=\(self.isRunning)")
 
         if settings.translatedAudioPlaybackEnabled, isRunning {
-            log.info("applyAudioOutputPolicy: 분기=start (재생 시작 + 덕킹 적용)")
+            log.info("\(LogTag.appState, privacy: .public) applyAudioOutputPolicy: 분기=start (재생 시작 + 덕킹 적용)")
             translatedAudioPlayer.volume = Float(settings.translatedAudioVolume)
             // 설정된 출력 장치로 라우팅(시작 직전 반영 — nil이면 시스템 기본).
             translatedAudioPlayer.setOutputDevice(uid: settings.translatedAudioOutputDeviceUID)
@@ -667,7 +681,7 @@ final class AppState {
                 systemAudioDucker.restore()
             }
         } else {
-            log.info("applyAudioOutputPolicy: 분기=stop (재생 중지 + 볼륨 복원)")
+            log.info("\(LogTag.appState, privacy: .public) applyAudioOutputPolicy: 분기=stop (재생 중지 + 볼륨 복원)")
             // 재생 off거나 정지 상태: 재생 중지 + 볼륨 복원 + provider 디코드 중단.
             translatedAudioPlayer.stop()
             systemAudioDucker.restore()

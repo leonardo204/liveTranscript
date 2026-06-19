@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// 통합형(클라우드) 번역 제공자 — `GeminiLiveClient`(actor)를 `PipelineEvent`로 어댑트한다(spec 004 P0).
 ///
@@ -16,6 +17,9 @@ actor GeminiTranslationProvider: TranslationProvider {
     nonisolated let capabilities: EngineCapabilities
     private let client: GeminiLiveClient
     private var pumpTask: Task<Void, Never>?
+    /// provider 수명 로그용 모델 식별자(spec 006 §4.6). 키/민감정보 미포함.
+    private let model: String
+    private let log = Logger(subsystem: AppConfig.bundleIdentifier, category: "Pipeline")
 
     init(
         apiKey: String,
@@ -24,6 +28,7 @@ actor GeminiTranslationProvider: TranslationProvider {
         requestInputTranscription: Bool,
         capabilities: EngineCapabilities
     ) {
+        self.model = model
         self.client = GeminiLiveClient(
             apiKey: apiKey,
             model: model,
@@ -36,6 +41,7 @@ actor GeminiTranslationProvider: TranslationProvider {
     }
 
     func start() async -> AsyncStream<PipelineEvent> {
+        log.info("\(LogTag.provider, privacy: .public) start — engine=gemini model=\(self.model, privacy: .public)")
         let (stream, continuation) = AsyncStream.makeStream(of: PipelineEvent.self)
         let client = self.client
         pumpTask = Task {
@@ -54,6 +60,7 @@ actor GeminiTranslationProvider: TranslationProvider {
     }
 
     func stop() async {
+        log.info("\(LogTag.provider, privacy: .public) stop")
         pumpTask?.cancel()
         pumpTask = nil
         await client.stop()

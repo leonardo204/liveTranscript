@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import Observation
 import SwiftUI
+import os
 
 /// 자막 HUD의 화면 내 세로 위치(스펙 §5.3 — 하단 중앙 기본).
 /// 결정적 raw 값으로 영속화한다(Date/난수 없음).
@@ -34,6 +35,9 @@ enum SubtitleVerticalPosition: String, CaseIterable, Identifiable {
 final class SettingsStore {
 
     private let defaults: UserDefaults
+
+    /// 설정 로드/변경 체크포인트 로그용(spec 006 §4.1/§4.2). 민감값(키 등)은 로그하지 않는다.
+    private let log = Logger(subsystem: AppConfig.bundleIdentifier, category: "Settings")
 
     private enum Key {
         static let monitorEnabled = "monitor.enabled"
@@ -189,6 +193,19 @@ final class SettingsStore {
         self.originalAudioDuckVolume = defaults.double(forKey: Key.originalAudioDuckVolume)
         // 출력 장치 UID 복원(미설정이면 nil = 시스템 기본 출력).
         self.translatedAudioOutputDeviceUID = defaults.string(forKey: Key.translatedAudioOutputDeviceUID)
+
+        // 설정 로드 체크포인트(spec 006 §4.1): 해석된 실제값 1줄. 키/민감값 미포함.
+        let inputSelLabel = loadInputSelection().map(Self.inputSelectionLabel) ?? "(미설정)"
+        log.info("\(LogTag.settings, privacy: .public) loaded — model=\(self.selectedModelID, privacy: .public) lang=\(self.targetLanguageCode, privacy: .public) showSource=\(self.showSourceText, privacy: .public) playback=\(self.translatedAudioPlaybackEnabled, privacy: .public) duck=\(self.originalAudioDuckingEnabled, privacy: .public) inputSel=\(inputSelLabel, privacy: .public) subPos=\(self.subtitleVerticalPosition.rawValue, privacy: .public)")
+    }
+
+    /// 입력 선택을 로그용 짧은 라벨로 변환한다(디바이스 UID 등 식별값은 로그에 넣지 않음).
+    private static func inputSelectionLabel(_ selection: InputSelection) -> String {
+        switch selection {
+        case .auto: return "auto"
+        case .systemTap: return "systemTap"
+        case .device: return "device"
+        }
     }
 
     // MARK: - 입력 소스 영속화 (태스크 A)
@@ -228,6 +245,8 @@ final class SettingsStore {
             defaults.set("device", forKey: Key.inputSelectionKind)
             defaults.set(uid, forKey: Key.inputSelectionDeviceUID)
         }
+        // 입력 선택 변경 체크포인트(spec 006 §4.2). 디바이스 UID 평문은 로그하지 않음(kind만).
+        log.info("\(LogTag.settings, privacy: .public) change — inputSel: \(Self.inputSelectionLabel(selection), privacy: .public)")
     }
 
     // MARK: - 자막 길이 break (태스크 B)
@@ -274,6 +293,7 @@ final class SettingsStore {
             } else {
                 defaults.removeObject(forKey: Key.subtitleScreenID)
             }
+            log.info("\(LogTag.settings, privacy: .public) change — subtitleScreenID: \(oldValue.map(String.init) ?? "main", privacy: .public) → \(self.subtitleScreenID.map(String.init) ?? "main", privacy: .public)")
         }
     }
 
@@ -281,6 +301,7 @@ final class SettingsStore {
     var subtitleVerticalPosition: SubtitleVerticalPosition {
         didSet {
             defaults.set(subtitleVerticalPosition.rawValue, forKey: Key.subtitleVerticalPosition)
+            log.info("\(LogTag.settings, privacy: .public) change — subtitleVerticalPosition: \(oldValue.rawValue, privacy: .public) → \(self.subtitleVerticalPosition.rawValue, privacy: .public)")
         }
     }
 
@@ -294,6 +315,8 @@ final class SettingsStore {
                 return  // 재대입이 didSet을 다시 호출하므로 여기서 종료.
             }
             defaults.set(subtitleVerticalOffset, forKey: Key.subtitleVerticalOffset)
+            // 클램프 재대입 경로는 위에서 return하므로, 여기 도달은 확정된 최종값 1회뿐(중복 로그 없음).
+            log.info("\(LogTag.settings, privacy: .public) change — subtitleVerticalOffset: \(oldValue, privacy: .public) → \(self.subtitleVerticalOffset, privacy: .public)")
         }
     }
 
@@ -411,23 +434,35 @@ final class SettingsStore {
     /// 번역 결과 오디오(Gemini 출력)를 스피커로 재생할지(기본 off — 자막 전용).
     /// on이면 AppState가 TranslatedAudioPlayer를 켜고 GeminiLiveClient에 재생 플래그를 전달한다.
     var translatedAudioPlaybackEnabled: Bool {
-        didSet { defaults.set(translatedAudioPlaybackEnabled, forKey: Key.translatedAudioPlaybackEnabled) }
+        didSet {
+            defaults.set(translatedAudioPlaybackEnabled, forKey: Key.translatedAudioPlaybackEnabled)
+            log.info("\(LogTag.settings, privacy: .public) change — translatedAudioPlaybackEnabled: \(oldValue, privacy: .public) → \(self.translatedAudioPlaybackEnabled, privacy: .public)")
+        }
     }
 
     /// 번역 오디오 소프트웨어 재생 볼륨(0...1, 기본 1.0). 시스템 출력 볼륨과 별개.
     var translatedAudioVolume: Double {
-        didSet { defaults.set(translatedAudioVolume, forKey: Key.translatedAudioVolume) }
+        didSet {
+            defaults.set(translatedAudioVolume, forKey: Key.translatedAudioVolume)
+            log.info("\(LogTag.settings, privacy: .public) change — translatedAudioVolume: \(oldValue, privacy: .public) → \(self.translatedAudioVolume, privacy: .public)")
+        }
     }
 
     /// 번역 재생 중 원문(시스템) 소리를 덕킹할지(기본 on).
     /// 주의: 번역 오디오도 같은 출력 장치로 나가므로 함께 작아진다(설계상 부분 덕킹).
     var originalAudioDuckingEnabled: Bool {
-        didSet { defaults.set(originalAudioDuckingEnabled, forKey: Key.originalAudioDuckingEnabled) }
+        didSet {
+            defaults.set(originalAudioDuckingEnabled, forKey: Key.originalAudioDuckingEnabled)
+            log.info("\(LogTag.settings, privacy: .public) change — originalAudioDuckingEnabled: \(oldValue, privacy: .public) → \(self.originalAudioDuckingEnabled, privacy: .public)")
+        }
     }
 
     /// 덕킹 시 낮출 목표 출력 볼륨(0...1, 기본 0.3).
     var originalAudioDuckVolume: Double {
-        didSet { defaults.set(originalAudioDuckVolume, forKey: Key.originalAudioDuckVolume) }
+        didSet {
+            defaults.set(originalAudioDuckVolume, forKey: Key.originalAudioDuckVolume)
+            log.info("\(LogTag.settings, privacy: .public) change — originalAudioDuckVolume: \(oldValue, privacy: .public) → \(self.originalAudioDuckVolume, privacy: .public)")
+        }
     }
 
     /// 번역 오디오를 내보낼 출력 장치 UID. nil이면 시스템 기본 출력 사용(기본값).
@@ -440,6 +475,8 @@ final class SettingsStore {
             } else {
                 defaults.removeObject(forKey: Key.translatedAudioOutputDeviceUID)
             }
+            // UID 식별값 평문 대신 설정/시스템기본 여부만 로그(spec 006 §1 비밀값/식별값 최소화).
+            log.info("\(LogTag.settings, privacy: .public) change — translatedAudioOutputDeviceUID: \(oldValue == nil ? "system" : "custom", privacy: .public) → \(self.translatedAudioOutputDeviceUID == nil ? "system" : "custom", privacy: .public)")
         }
     }
 
@@ -448,12 +485,18 @@ final class SettingsStore {
     /// 번역 대상 언어 코드(BCP-47, 기본 ko). GeminiLiveClient setup에 사용.
     /// 풍부한 언어 선택 UI는 M4 — 지금은 영속 값만 둔다.
     var targetLanguageCode: String {
-        didSet { defaults.set(targetLanguageCode, forKey: Key.targetLanguageCode) }
+        didSet {
+            defaults.set(targetLanguageCode, forKey: Key.targetLanguageCode)
+            log.info("\(LogTag.settings, privacy: .public) change — targetLanguageCode: \(oldValue, privacy: .public) → \(self.targetLanguageCode, privacy: .public)")
+        }
     }
 
     /// 원문 동시 표시(FR-8, 기본 OFF — 번역만). HUD/메뉴 공통 참조.
     var showSourceText: Bool {
-        didSet { defaults.set(showSourceText, forKey: Key.showSourceText) }
+        didSet {
+            defaults.set(showSourceText, forKey: Key.showSourceText)
+            log.info("\(LogTag.settings, privacy: .public) change — showSourceText: \(oldValue, privacy: .public) → \(self.showSourceText, privacy: .public)")
+        }
     }
 
     // MARK: - 모델 선택 (spec 005)
@@ -464,7 +507,10 @@ final class SettingsStore {
     /// 선택된 모델 카탈로그 id. `ModelCatalog.resolved(id:)`로 디스크립터를 해석한다.
     /// 변경 시 AppState가 핫스왑(번역 중) 또는 다음 시작에 반영한다.
     var selectedModelID: String {
-        didSet { defaults.set(selectedModelID, forKey: Key.selectedModelID) }
+        didSet {
+            defaults.set(selectedModelID, forKey: Key.selectedModelID)
+            log.info("\(LogTag.settings, privacy: .public) change — selectedModelID: \(oldValue, privacy: .public) → \(self.selectedModelID, privacy: .public)")
+        }
     }
 
     // MARK: - 미니 HUD(모니터) 정책

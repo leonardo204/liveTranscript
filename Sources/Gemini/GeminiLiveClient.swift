@@ -108,7 +108,7 @@ actor GeminiLiveClient {
         didSet {
             guard state != oldValue else { return }
             // 상태 전이는 저빈도 — 매번 로그(연결중/ready/error 추적). 키/URL 미포함.
-            log.info("state 전이: \(Self.stateLabel(oldValue), privacy: .public) → \(Self.stateLabel(self.state), privacy: .public)")
+            log.info("\(LogTag.gemini, privacy: .public) state 전이: \(Self.stateLabel(oldValue), privacy: .public) → \(Self.stateLabel(self.state), privacy: .public)")
             emit(.state(state))
         }
     }
@@ -409,7 +409,7 @@ actor GeminiLiveClient {
         task.resume()
         // 진단: generation + 최초/재연결 구분 + 핸들 보유 여부. 마스킹 URL만(키 미포함).
         let kind = connectAttempts > 0 ? "재연결" : "최초"
-        log.info("WebSocket 연결 시도(\(kind, privacy: .public), gen=\(gen, privacy: .public), 핸들=\(self.resumptionHandle != nil ? "있음" : "없음", privacy: .public)): \(self.maskedURLString, privacy: .public)")
+        log.info("\(LogTag.gemini, privacy: .public) connect — WebSocket 연결 시도(\(kind, privacy: .public), gen=\(gen, privacy: .public), 핸들=\(self.resumptionHandle != nil ? "있음" : "없음", privacy: .public)): \(self.maskedURLString, privacy: .public)")
     }
 
     private func teardownSocket() {
@@ -432,7 +432,7 @@ actor GeminiLiveClient {
     /// 여기서 비로소 setup(첫 메시지)을 전송한다. 늦게 도착한 이전 세대 콜백은 무시.
     fileprivate func handleDidOpen(generation gen: Int) {
         guard gen == generation, !stopped else { return }
-        log.info("WebSocket handshake 완료(didOpen) → setup 전송")
+        log.info("\(LogTag.gemini, privacy: .public) handshake 완료(didOpen) → setup 전송")
         sendSetup()
     }
 
@@ -440,7 +440,7 @@ actor GeminiLiveClient {
     private func sendSetup() {
         guard let task, !setupSent else { return }
         setupSent = true
-        log.info("setup 전송: 핸들=\(self.resumptionHandle != nil ? "있음(재개)" : "없음(새 세션)", privacy: .public)")
+        log.info("\(LogTag.gemini, privacy: .public) setup 전송: 핸들=\(self.resumptionHandle != nil ? "있음(재개)" : "없음(새 세션)", privacy: .public)")
         let setup = makeSetupMessage()
         guard let data = try? JSONEncoder().encode(setup),
               let json = String(data: data, encoding: .utf8) else {
@@ -495,7 +495,7 @@ actor GeminiLiveClient {
             connectAttempts = 0
             setupCompleteReceived = true   // A1/B1: 정상 setup 수신 표시(연속 실패 카운터 리셋의 근거)
             state = .ready
-            log.info("setupComplete 수신 → ready")   // A1: 콘솔에도 1줄(연결 성공 시점 식별)
+            log.info("\(LogTag.gemini, privacy: .public) setupComplete 수신 → ready")   // A1: 콘솔에도 1줄(연결 성공 시점 식별)
             emit(.info("Gemini 연결됨 (setup 완료)"))
             // 세션 한도(약 15분) 도달 전 선제 핸드오버를 예약(M2c). setupComplete마다 재무장.
             armProactiveReconnect()
@@ -573,7 +573,7 @@ actor GeminiLiveClient {
 
         // goAway: 서버가 곧 연결을 종료한다는 예고 → 저장된 핸들로 선제 재연결(무중단 핸드오버).
         if let goAway = msg.goAway {
-            log.info("goAway 수신 — 선제 핸드오버 (timeLeft=\(goAway.timeLeft ?? "?", privacy: .public))")
+            log.info("\(LogTag.gemini, privacy: .public) goAway 수신 — 선제 핸드오버 (timeLeft=\(goAway.timeLeft ?? "?", privacy: .public))")
             emit(.info("세션 전환 중 (무중단 재연결)"))
             Task { await reconnectWithHandle() }
         }
@@ -607,7 +607,7 @@ actor GeminiLiveClient {
                                     reasonLength: Int) {
         guard gen == generation, !stopped else { return }
         // A1: setupSent/setupComplete 수신 여부를 함께 찍어 "setup 직후 close"를 식별 가능하게 한다.
-        log.error("WebSocket close 수신: code=\(closeCode.rawValue) reasonBytes=\(reasonLength) setupSent=\(self.setupSent) setupComplete=\(self.setupCompleteReceived)")
+        log.error("\(LogTag.gemini, privacy: .public) close 수신: code=\(closeCode.rawValue) reasonBytes=\(reasonLength) setupSent=\(self.setupSent) setupComplete=\(self.setupCompleteReceived)")
 
         switch closeCode {
         case .policyViolation, .unsupportedData, .invalidFramePayloadData:
@@ -628,7 +628,7 @@ actor GeminiLiveClient {
 
         if let status = httpStatus {
             // A1: setupSent/setupComplete 수신 여부를 함께 찍어 "setup 직후 종료"를 식별 가능하게 한다.
-            log.error("WebSocket 종료: HTTP status=\(status) setupSent=\(self.setupSent) setupComplete=\(self.setupCompleteReceived)")
+            log.error("\(LogTag.gemini, privacy: .public) 종료: HTTP status=\(status) setupSent=\(self.setupSent) setupComplete=\(self.setupCompleteReceived)")
             // 핸드셰이크가 HTTP 4xx로 거부됨 → 키/모델/요청 문제. 재연결 무의미.
             if (400...499).contains(status) {
                 let hint: String
@@ -643,7 +643,7 @@ actor GeminiLiveClient {
             }
         } else if let domain = errorDomain {
             // 응답조차 못 받음(네트워크/소켓). 원문 대신 도메인/코드만.
-            log.error("WebSocket 종료: \(domain, privacy: .public) code=\(errorCode ?? 0)")
+            log.error("\(LogTag.gemini, privacy: .public) 종료: \(domain, privacy: .public) code=\(errorCode ?? 0)")
         }
 
         // setup 완료 전에 닫혔으면 핸드셰이크 실패로 간주(연속 실패 카운트 증가 경로).
@@ -655,7 +655,7 @@ actor GeminiLiveClient {
         stopped = true
         generation += 1
         teardownSocket()
-        log.error("영구 실패 — 재연결 중단: \(message, privacy: .public)")
+        log.error("\(LogTag.gemini, privacy: .public) permanentFailure — 재연결 중단: \(message, privacy: .public)")
         state = .error(message)
         emit(.info(message))
         // 상태 표시는 유지하되, 세션 수명 종료를 별도 신호로 보내 소비자가 오디오 재생 정지/
@@ -694,7 +694,7 @@ actor GeminiLiveClient {
         let delay = reconnectDelay
         reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
         // 로그 폭주 방지: 간결한 1줄.
-        log.error("재연결 예약: \(delay, format: .fixed(precision: 1))s 후 (attempt \(self.connectAttempts))")
+        log.error("\(LogTag.gemini, privacy: .public) reconnect 예약: \(delay, format: .fixed(precision: 1))s 후 (attempt \(self.connectAttempts))")
         state = .error("연결 끊김 — 재연결 중")
         emit(.info("연결 끊김 — 재연결 중"))
 
@@ -710,7 +710,7 @@ actor GeminiLiveClient {
     private func armProactiveReconnect() {
         proactiveReconnectTask?.cancel()
         let interval = proactiveReconnectInterval
-        log.info("선제 재연결 타이머 arm: \(interval, format: .fixed(precision: 0))s 후")
+        log.info("\(LogTag.gemini, privacy: .public) reconnect 타이머 arm: \(interval, format: .fixed(precision: 0))s 후")
         proactiveReconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             guard !Task.isCancelled else { return }
@@ -721,7 +721,7 @@ actor GeminiLiveClient {
     /// 선제 재연결 실행: ready 상태에서만 핸들 기반으로 끊김 없이 새 세션으로 넘어간다.
     private func proactiveReconnect() async {
         guard !stopped, state == .ready else { return }
-        log.info("선제 재연결(세션 한도 전 핸드오버)")
+        log.info("\(LogTag.gemini, privacy: .public) reconnect(세션 한도 전 핸드오버)")
         emit(.info("세션 갱신 중 (무중단 재연결)"))
         await reconnectWithHandle()
     }

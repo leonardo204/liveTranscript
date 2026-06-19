@@ -22,20 +22,20 @@ struct ModelCatalog {
     /// 번들 JSON을 디코드한다. 실패/빈 목록이면 nil(호출자가 폴백).
     private static func loadFromBundle() -> [ModelDescriptor]? {
         guard let url = Bundle.main.url(forResource: "models", withExtension: "json") else {
-            log.error("models.json 번들 리소스를 찾지 못함 → builtInGemini 폴백")
+            log.error("\(LogTag.catalog, privacy: .public) load failed → builtIn fallback — reason=models.json 번들 리소스 없음")
             return nil
         }
         do {
             let data = try Data(contentsOf: url)
             let file = try JSONDecoder().decode(ModelCatalogFile.self, from: data)
             guard !file.models.isEmpty else {
-                log.error("models.json 디코드 성공이나 models 비어 있음 → builtInGemini 폴백")
+                log.error("\(LogTag.catalog, privacy: .public) load failed → builtIn fallback — reason=models 비어 있음")
                 return nil
             }
-            log.info("models.json 로드 성공: \(file.models.count, privacy: .public)개 모델")
+            log.info("\(LogTag.catalog, privacy: .public) loaded — count=\(file.models.count, privacy: .public) source=bundle default=\(file.models.first?.id ?? "?", privacy: .public)")
             return file.models
         } catch {
-            log.error("models.json 디코드 실패: \(error.localizedDescription, privacy: .public) → builtInGemini 폴백")
+            log.error("\(LogTag.catalog, privacy: .public) load failed → builtIn fallback — reason=\(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
