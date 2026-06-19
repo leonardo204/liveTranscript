@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Observation
 import os
@@ -86,10 +87,14 @@ final class AppState {
 
     /// 사용자 의도(최신). isRunning은 이를 즉시 미러한다.
     @ObservationIgnored private var desiredRunning = false
-    /// 실제 파이프라인 on 여부(audio+Gemini 실제 가동 상태).
+    /// 실제 파이프라인 on 여부(audio+provider 실제 가동 상태).
     @ObservationIgnored private var actualRunning = false
-    /// 키/언어 변경 등으로 Gemini 재연결이 필요함을 표시.
-    @ObservationIgnored private var needsGeminiReload = false
+    /// 현재 가동 중인 provider의 구성 스냅샷(엔진/언어/원문표시/키지문). 정지 시 nil.
+    /// `currentDesiredConfig()`와 다르면 핫스왑이 필요함을 의미한다(spec 004 §7.2 — 구 needsGeminiReload 대체).
+    @ObservationIgnored private var actualConfig: ProviderConfig?
+    /// 파이프라인 세대 토큰(spec 004 §7.5). teardown/재생성마다 증가시켜, 지난 세대의
+    /// stale 이벤트가 새 세대 상태(자막/오디오/비용)에 섞이지 않도록 이벤트 소비 루프에서 펜싱한다.
+    @ObservationIgnored private var epoch: UInt64 = 0
     /// 단 하나만 살아있는 직렬 reconciler Task.
     @ObservationIgnored private var reconcileTask: Task<Void, Never>?
     /// 영구 실패 사유(best-effort). performStop이 라벨을 "연결 안 됨"으로 덮을 때,
@@ -218,7 +223,7 @@ final class AppState {
             log.info("clearAPIKey 성공 → reloadTranslationSession 호출")
             refreshKeyState()
             connectionTestState = .idle
-            // 번역 중에 키를 지우면 재연결 시 키가 없어 performGeminiReload가 정지로 수렴한다(정지 중이면 무시).
+            // 번역 중에 키를 지우면 재연결 시 키가 없어 performProviderSwap이 정지로 수렴한다(정지 중이면 무시).
             reloadTranslationSession()
             return .success(())
         } catch {
@@ -289,37 +294,63 @@ final class AppState {
             log.info("reloadTranslationSession: 무시(desiredRunning=false — 다음 시작에 자연 반영)")
             return
         }
-        log.info("reloadTranslationSession: 재연결 요청(desiredRunning=true) → needsGeminiReload=true")
-        needsGeminiReload = true
+        // 구성(언어/키/엔진/원문표시) 변경 가능성 → reconciler가 actualConfig와 비교해
+        // 실제 달라졌을 때만 핫스왑한다(불변 변경이면 no-op). spec 004 §7.8.
+        log.info("reloadTranslationSession: 구성 재평가 요청(desiredRunning=true) → kickReconcile")
         kickReconcile()
     }
 
     // MARK: - reconciler (단일 직렬 수렴 루프)
 
-    /// reconciler가 이미 수렴 중이면 플래그만 갱신하고 그 태스크가 처리하도록 둔다.
-    /// 동시 1개 보장(동시성 불변식의 핵심 가드).
+    /// 현재 가동 중인(또는 가동할) provider의 구성 스냅샷(spec 004 §7.2).
+    /// 값 비교로 핫스왑을 판정한다. 키는 평문이 아니라 실행 내 안정 지문으로만 비교한다.
+    private struct ProviderConfig: Equatable {
+        var engine: TranslationEngineKind
+        var targetLanguage: String
+        var showSource: Bool
+        var keyFingerprint: String?
+    }
+
+    /// 설정+키로부터 "원하는 구성"을 계산한다. keyFingerprint는 키 평문이 아니라
+    /// **결정적 SHA256 다이제스트**라 비교/로그에 안전하고, 다른 키면 항상 다른 값이 보장된다.
+    /// (String.hashValue는 프로세스마다 SipHash 시드가 랜덤이라 충돌 시 키 교체를 놓칠 수 있어 회피.)
+    private func currentDesiredConfig() -> ProviderConfig {
+        ProviderConfig(
+            engine: .geminiLive,   // P0/§7: 고정(P2에서 설정 기반 분기로 확장).
+            targetLanguage: settings.targetLanguageCode,
+            showSource: settings.showSourceText,
+            keyFingerprint: geminiAPIKey().map(Self.fingerprint)
+        )
+    }
+
+    /// 키 평문을 노출하지 않는 결정적 지문(SHA256 hex). 구성 비교 전용.
+    private static func fingerprint(_ key: String) -> String {
+        SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// reconciler가 이미 수렴 중이면 그 태스크가 마저 처리하도록 둔다(동시 1개 보장 — 핵심 가드).
     private func kickReconcile() {
-        guard reconcileTask == nil else { return }   // 이미 수렴 중 → 그 태스크가 desired/플래그를 마저 처리
+        guard reconcileTask == nil else { return }   // 이미 수렴 중 → 그 태스크가 desired/config를 마저 처리
         reconcileTask = Task { [weak self] in await self?.reconcileLoop() }
     }
 
-    /// desired/플래그가 더 이상 전환을 요구하지 않을 때까지 한 번에 하나씩 await로 수렴시킨다.
+    /// desired/config가 더 이상 전환을 요구하지 않을 때까지 한 번에 하나씩 await로 수렴시킨다.
     /// race-free 근거: 아래 while 조건 평가 → (false면) reconcileTask=nil 대입까지
     /// **await가 없으므로**, 그 사이 동기 toggleCapture가 끼어들 수 없다.
     /// toggle은 항상 while 평가 전(이미 수렴 중이면 가드로 무시) 또는 nil 대입 후에만 실행된다.
     private func reconcileLoop() async {
         while needsTransition() {
-            // 진단: 매 반복의 desired/actual/needsGeminiReload + 선택 분기(상태머신 추적).
+            // 진단: 매 반복의 desired/actual/구성변경 여부 + 선택 분기(상태머신 추적).
+            let cfgChanged = actualConfig != currentDesiredConfig()
             if desiredRunning && !actualRunning {
-                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) reload=\(self.needsGeminiReload, privacy: .public) → performStart")
+                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) → performStart")
                 await performStart()
             } else if !desiredRunning && actualRunning {
-                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) reload=\(self.needsGeminiReload, privacy: .public) → performStop")
+                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) → performStop")
                 await performStop()
-            } else if desiredRunning && actualRunning && needsGeminiReload {
-                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) reload=\(self.needsGeminiReload, privacy: .public) → performGeminiReload")
-                needsGeminiReload = false
-                await performGeminiReload()
+            } else if desiredRunning && actualRunning && cfgChanged {
+                log.info("reconcile: desired=\(self.desiredRunning, privacy: .public) actual=\(self.actualRunning, privacy: .public) cfgChanged=true → performProviderSwap(핫스왑)")
+                await performProviderSwap()
             } else {
                 break
             }
@@ -327,10 +358,10 @@ final class AppState {
         reconcileTask = nil   // ← while(false) 직후 동기 대입(중간 await 없음 → toggle 끼어듦 차단)
     }
 
-    /// 추가 전환이 필요한지 판정.
+    /// 추가 전환이 필요한지 판정. 구성(엔진/언어/원문표시/키) 변경도 전환 사유다(핫스왑).
     private func needsTransition() -> Bool {
         if desiredRunning != actualRunning { return true }
-        if desiredRunning && needsGeminiReload { return true }
+        if desiredRunning && actualRunning && actualConfig != currentDesiredConfig() { return true }
         return false
     }
 
@@ -353,7 +384,7 @@ final class AppState {
             desiredRunning = false
             isRunning = false
             actualRunning = false
-            needsGeminiReload = false
+            actualConfig = nil
             return
         }
         log.info("performStart: 키 있음 → 캡처+Gemini 시작")
@@ -366,7 +397,7 @@ final class AppState {
         // 번역 오디오 출력/덕킹 정책 적용(설정+실행상태 기준 — actualRunning 확정 전이지만
         // applyAudioOutputPolicy는 isRunning을 보고, isRunning은 desiredRunning을 미러한다).
         applyAudioOutputPolicy()
-        needsGeminiReload = false
+        actualConfig = currentDesiredConfig()   // 가동 구성 스냅샷(이후 핫스왑 판정 기준)
         actualRunning = true
         log.info("performStart 완료: actualRunning=true")
     }
@@ -377,30 +408,37 @@ final class AppState {
     private func performStop() async {
         log.info("performStop 진입")
         audio.stop()
-        await stopGemini()   // ← fire-and-forget 금지: client.stop() 완료까지 대기(좀비/중복 방지)
+        await stopGemini()   // ← fire-and-forget 금지: provider.stop() 완료까지 대기(좀비/중복 방지)
         subtitleOverlay.applyCapturePolicy(isCapturing: false)
         // 번역 오디오 재생 정지 + 시스템 볼륨 복원.
         translatedAudioPlayer.stop()
         systemAudioDucker.restore()
+        // 누수 위생(spec 004 §7.13.3): 정지 시 자막 누적/dedup 버퍼도 비운다(잔류 방지).
+        subtitles.reset()
         // 정지 라벨은 영구 실패 사유가 있으면 그것을 우선 노출(best-effort).
         if let reason = lastFailureReason {
             geminiStatus = reason
         }
         actualRunning = false
-        needsGeminiReload = false
+        actualConfig = nil
         log.info("performStop 완료: actualRunning=false")
     }
 
-    /// 캡처(audio)는 유지한 채 Gemini만 안전 재연결한다(직렬 reconciler가 호출).
-    /// 이전 client.stop()을 끝까지 await한 뒤 새 키로 재시작. 키가 없으면 정지로 수렴.
-    private func performGeminiReload() async {
-        log.info("performGeminiReload 진입")
-        await stopGemini()   // 이전 세션 완전 정지까지 대기
+    /// 구성(엔진/언어/키/원문표시) 변경 시 **캡처(audio)는 유지**한 채 provider만 안전 교체한다(핫스왑).
+    /// 입력 오디오는 엔진 무관 공유 자원이라 끊지 않는다(권한 재요청 없음). spec 004 §7.6/§7.8.
+    /// 이전 provider.stop()을 끝까지 await한 뒤(무중첩) 새 구성으로 재시작. 키가 없으면 정지로 수렴.
+    private func performProviderSwap() async {
+        log.info("performProviderSwap 진입")
+        await stopGemini()   // 이전 provider 완전 정지까지 대기(무중첩 — 불변식 4)
+        // 핫스왑 위생(spec 004 §7.13): 이전 generation/언어로 합성된 잔여 PCM이 새 provider
+        // 연결 직후 잠깐 재생되지 않도록 출력 큐를 비운다(.interrupted/.generationComplete와 일관).
+        translatedAudioPlayer.flush()
         guard let key = geminiAPIKey(), !key.isEmpty else {
-            log.error("performGeminiReload 중단: 키 없음 → 정지로 수렴")
+            log.error("performProviderSwap 중단: 키 없음 → 정지로 수렴")
             geminiStatus = "API 키 없음 — 설정에서 Gemini API 키를 입력하세요"
             desiredRunning = false
             isRunning = false
+            actualConfig = nil
             // 캡처도 내려야 하므로 다음 루프에서 performStop이 돌도록 actualRunning은 유지.
             // 다만 덕킹/재생은 즉시 정리한다(다음 performStop까지 1틱 덕킹이 유지되는 것 방지).
             // performStop이 멱등으로 다시 호출해도 무해하다.
@@ -408,11 +446,12 @@ final class AppState {
             systemAudioDucker.restore()
             return
         }
-        log.info("performGeminiReload: 키 있음 → Gemini 재시작")
+        log.info("performProviderSwap: 키 있음 → provider 재시작(새 구성)")
         startGemini(apiKey: key)
         // 자막/오디오 정책은 그대로 유지(캡처는 끊기지 않았다).
         applyAudioOutputPolicy()
-        log.info("performGeminiReload 완료")
+        actualConfig = currentDesiredConfig()   // 교체 후 구성 스냅샷 갱신
+        log.info("performProviderSwap 완료")
     }
 
     // MARK: - Gemini 수명주기 (M2a)
@@ -423,7 +462,7 @@ final class AppState {
     ///  정책 주석은 GeminiTranslationProvider로 이관했다.)
     private func startGemini(apiKey: String) {
         // 이전 세션 잔재 정리(동기 부분만): onChunk/eventTask 해제 + 핸들 비움.
-        // 실제 provider.stop()까지의 대기는 호출처(performStart/performGeminiReload)에서
+        // 실제 provider.stop()까지의 대기는 호출처(performStart/performProviderSwap)에서
         // 이미 await로 보장하므로 여기서는 동기 정리만 한다(멱등).
         clearGeminiHandles()
         subtitles.reset()
@@ -442,10 +481,15 @@ final class AppState {
         audio.onChunk = { chunk in p.send(chunk) }
 
         // 이벤트 스트림 소비(연결/상태/번역 텍스트) — MainActor에서 HUD/상태 갱신.
+        // epoch 펜싱(spec 004 §7.5/§7.9): clearGeminiHandles에서 epoch가 증가하므로,
+        // 이 Task가 캡처한 myEpoch와 현재 epoch가 다르면(=이미 교체/정지됨) stale 이벤트로 폐기.
+        // (Task는 MainActor 격리 — self.epoch 읽기/handle 호출 안전.)
+        let myEpoch = epoch
         eventTask = Task { [weak self] in
             let stream = await p.start()
             for await event in stream {
                 guard let self else { break }
+                guard self.epoch == myEpoch else { continue }   // 지난 세대 이벤트 폐기
                 self.handle(event)
             }
         }
@@ -456,6 +500,9 @@ final class AppState {
     /// (startGemini의 동기 정리처럼 반환을 무시해도 되는 호출이 있어 @discardableResult.)
     @discardableResult
     private func clearGeminiHandles() -> (any TranslationProvider)? {
+        // 세대 증가(spec 004 §7.5): 이 시점 이후 이전 eventTask가 늦게 내보낼 수 있는
+        // stale 이벤트를 handle 직전 가드에서 폐기하게 만든다(취소+펜싱 이중 방어).
+        epoch &+= 1
         audio.onChunk = nil
         eventTask?.cancel()
         eventTask = nil
@@ -539,7 +586,6 @@ final class AppState {
             log.error("permanentFailure → 세션 정지: \(reason, privacy: .public)")
             desiredRunning = false
             isRunning = false
-            needsGeminiReload = false
             lastFailureReason = reason   // performStop이 정지 라벨을 덮을 때 이 사유를 우선 노출
             geminiStatus = reason
             kickReconcile()
@@ -599,6 +645,9 @@ final class AppState {
     /// await한 뒤 provider에 진입하므로 호출 순서(FIFO)가 보장된다 → 마지막 호출이 최종값.
     /// (fire-and-forget Task 난사 시 진입 순서 미보장으로 최종값이 뒤집히던 문제 수정.)
     /// provider가 없으면 no-op(시작 전/정지 후 호출 안전).
+    /// 주의: FIFO 체인은 호출 시점의 provider 인스턴스를 캡처한다. 핫스왑 직후 직전 체인의
+    /// 잔여 Task가 옛 provider에 적용될 수 있으나, 옛 provider는 stop된 상태라 무해하다
+    /// (새 provider엔 startGemini가 별도 syncPlaybackEnabled로 최종값을 적용한다).
     private func syncPlaybackEnabled(_ on: Bool) {
         guard let prov = provider else { return }
         let prev = playbackSyncTask
