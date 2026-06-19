@@ -66,14 +66,42 @@ final class SubtitleEngine {
     /// 뷰가 이 전이를 페이드 인/아웃으로 렌더한다.
     private(set) var isVisible: Bool = false
 
-    /// HUD에 보여줄 "현재 번역문" — 누적 중이면 누적분, 아니면 마지막 확정분.
+    // MARK: - roll-up(세그먼트 모드) 상태 (B안, spec 007 §5)
+
+    /// 세그먼트(STT/MT) 모드에서 확정 번역 문장들의 FIFO. 깊이 = `subtitleMaxLines`.
+    /// 새 확정 문장이 들어오면 위로 굴러가고(오래된 것 제거), 문장마다 사라지지 않는다(roll-up 표준).
+    /// 1줄 설정이면 A안(교체), N줄이면 FIFO roll-up이 된다.
+    private(set) var rollupLines: [String] = []
+
+    /// 세그먼트 경로(`ingestSegment`)가 한 번이라도 쓰이면 true → 표시 모델을 roll-up으로 전환.
+    /// Gemini delta 경로와 한 세션에서 섞이지 않으며, `reset()`에서 false로 되돌린다.
+    private(set) var segmentMode = false
+
+    /// roll-up 무음 정리 타이머(긴 무음에만 전체 정리 — 문장마다 페이드하지 않기 위함).
+    @ObservationIgnored private var idleClearTask: Task<Void, Never>?
+
+    /// roll-up 모드에서 마지막 세그먼트 이후 이 시간(초) 동안 조용하면 화면을 정리한다.
+    /// 문장 간 공백마다 사라지지 않도록 holdSeconds(2s)보다 충분히 길게 둔다.
+    private static let rollupIdleClearSeconds: Double = 8.0
+
+    /// roll-up 깊이(= 사용자 자막 줄수). 최소 1.
+    private var rollupDepth: Int { max(1, settings?.subtitleMaxLines ?? 2) }
+
+    /// HUD에 보여줄 "현재 번역문".
+    /// - 세그먼트 모드: 확정 문장 FIFO(최근 `rollupDepth`개)를 줄바꿈으로 이어 표시(roll-up).
+    /// - delta(Gemini) 모드: 누적 중이면 누적분, 아니면 마지막 확정분.
     var displayTranslation: String {
-        currentTranslation.isEmpty ? confirmedTranslation : currentTranslation
+        if segmentMode {
+            let lines = currentTranslation.isEmpty ? rollupLines : rollupLines + [currentTranslation]
+            return lines.suffix(rollupDepth).joined(separator: "\n")
+        }
+        return currentTranslation.isEmpty ? confirmedTranslation : currentTranslation
     }
 
-    /// HUD에 보여줄 "현재 원문".
+    /// HUD에 보여줄 "현재 원문". 세그먼트 모드에선 진행 중(interim) 원문 1줄.
     var displaySource: String {
-        currentSource.isEmpty ? confirmedSource : currentSource
+        if segmentMode { return currentSource }
+        return currentSource.isEmpty ? confirmedSource : currentSource
     }
 
     // MARK: - 타이밍 상수 (스펙 §5.4)
@@ -202,23 +230,54 @@ final class SubtitleEngine {
     ///   - isFinal: true면 확정 경계(`confirmTurn` 재사용 — hold/dedup/scheduleHide),
     ///     false면 라이브 갱신만(current 교체 + isVisible 유지).
     func ingestSegment(translation: String?, source: String?, isFinal: Bool) {
-        // 진단: 어떤 줄을 어떻게 갱신했는지(앞 40자/길이/확정 여부) — 교체 모델 추적용(텍스트, 키 아님).
+        // 진단: 어떤 줄을 어떻게 갱신했는지(앞 40자/길이/확정 여부) — roll-up 추적용(텍스트, 키 아님).
         log.debug("\(LogTag.subtitle, privacy: .public) segment: t=\"\((translation ?? "·").prefix(40), privacy: .public)\" s=\"\((source ?? "·").prefix(40), privacy: .public)\" final=\(isFinal, privacy: .public)")
 
-        // 세그먼트 경로는 delta 누적 모델의 generation-리셋 대기 플래그와 무관하다 — 잔재가 다음
-        // 교체에 끼어들지 않도록 명시적으로 false로 둔다(둘이 섞이지 않음 보장).
+        // roll-up(세그먼트) 모드로 전환. delta 누적 모델의 generation-리셋 플래그는 무관 → false 고정.
+        segmentMode = true
         pendingGenerationReset = false
 
-        // current 버퍼를 append가 아니라 직접 교체(showPreview의 set 로직을 타이머 없이 차용).
-        if let translation { currentTranslation = translation }
+        // 원문(원문 동시 표시)은 진행 중 interim을 라이브로 갱신만 한다(확정/페이드 없음).
         if let source { currentSource = source }
 
-        if isFinal {
-            // 확정 경계: 기존 confirmTurn(dedup/hold/scheduleHide)을 재사용해 줄을 고정·페이드.
-            confirmTurn(reason: .turnComplete)
-        } else {
-            // 라이브 갱신: 보이게 하고 진행 중 숨김 타이머만 취소(문장이 계속 갱신 중).
-            showAndCancelHide()
+        if let translation {
+            if isFinal {
+                // 확정 문장 → dedup/collapse 후 roll-up FIFO에 push(직전과 동일하면 무시).
+                let collapsed = Self.dedupGlobalSentences(Self.collapseRepeats(translation))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !collapsed.isEmpty, rollupLines.last != collapsed {
+                    rollupLines.append(collapsed)
+                    if rollupLines.count > rollupDepth {
+                        rollupLines.removeFirst(rollupLines.count - rollupDepth)
+                    }
+                }
+                currentTranslation = ""   // 진행 중 번역 줄 없음(final-only)
+            } else {
+                // volatile 번역(현재 final-only라 사실상 안 옴) — 진행 줄로만 표시.
+                currentTranslation = translation
+            }
+        }
+
+        // roll-up은 문장마다 페이드하지 않는다 — 짧은 hide/silence 타이머를 끄고, 긴 무음 정리만 건다.
+        hideTask?.cancel(); hideTask = nil
+        silenceTask?.cancel(); silenceTask = nil
+        isVisible = true
+        armIdleClear()
+    }
+
+    /// roll-up 모드 무음 정리: 마지막 세그먼트 이후 rollupIdleClearSeconds 동안 조용하면 화면을 비운다.
+    /// 세그먼트마다 재설정되므로 말이 이어지는 동안에는 유지된다(문장 사이 공백마다 사라지지 않음).
+    private func armIdleClear() {
+        idleClearTask?.cancel()
+        let nanos = UInt64(Self.rollupIdleClearSeconds * 1_000_000_000)
+        idleClearTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: nanos)
+            guard !Task.isCancelled, let self else { return }
+            self.log.debug("\(LogTag.subtitle, privacy: .public) roll-up idle clear: 무음 \(Self.rollupIdleClearSeconds, privacy: .public)s → 화면 정리")
+            self.rollupLines = []
+            self.currentTranslation = ""
+            self.currentSource = ""
+            self.isVisible = false
         }
     }
 
@@ -254,10 +313,13 @@ final class SubtitleEngine {
         log.debug("\(LogTag.subtitle, privacy: .public) 자막 reset")
         hideTask?.cancel(); hideTask = nil
         silenceTask?.cancel(); silenceTask = nil
+        idleClearTask?.cancel(); idleClearTask = nil
         currentTranslation = ""
         currentSource = ""
         confirmedTranslation = ""
         confirmedSource = ""
+        rollupLines = []
+        segmentMode = false
         pendingGenerationReset = false   // generation 경계 상태도 초기화(다음 세션은 깨끗하게 시작)
         isVisible = false
     }
