@@ -19,9 +19,8 @@ actor AppleTranslationStage: TextTransformStage {
     private let targetLanguageCode: String
     private let host: TranslationSessionHost
 
-    /// 번역 요청/스킵 로그 스로틀(고빈도 volatile). 첫 1회 + N회마다 1회.
+    /// 번역 요청 로그 스로틀. 첫 1회 + N회마다 1회(확정 세그먼트는 항상).
     private var reqLogCount = 0
-    private var skipLogCount = 0
 
     private static let log = Logger(subsystem: AppConfig.bundleIdentifier, category: "Pipeline")
 
@@ -41,52 +40,27 @@ actor AppleTranslationStage: TextTransformStage {
                 // 세션 발급 요청(언어 설정). 최초 1회.
                 await host.configure(source: source, target: target)
 
-                // 부하 제어 상태: 현재 번역 처리 중인지 + 대기 중인 final.
-                var inFlight = false
-                // 마지막으로 처리하지 못한 입력(volatile은 최신, final은 보장). 처리 후 갱신.
-                var pending: (text: String, isFinal: Bool)?
-
-                // 직렬 번역 펌프 — pending을 하나씩 처리한다.
-                func drain() async {
-                    while let next = pending {
-                        pending = nil
-                        inFlight = true
-                        let out = await host.translate(next.text) ?? next.text
-                        continuation.yield(.segment(text: out, isFinal: next.isFinal))
-                        await self.logRequest(text: next.text, isFinal: next.isFinal)
-                        inFlight = false
-                    }
-                }
-
+                // 번역은 **확정(isFinal) 세그먼트만** 수행한다(spec §8 튜닝).
+                // 이유: 온디바이스 번역이 빨라 volatile(부분 문장)마다 재번역되면, 부분 문장 MT가
+                // 비단조적으로 요동쳐 자막이 심하게 깜빡인다. 확정 문장 단위로만 번역하면 안정적이다.
+                // (라이브 진행 피드백이 필요하면 '원문 표시'로 STT 원문을 실시간으로 본다 — 원문 세그먼트는
+                //  ComposedTranslationProvider가 .sourceSegment로 별도 방출한다.)
                 for await ev in input {
                     if Task.isCancelled { break }
                     switch ev {
                     case .segment(let text, let isFinal):
-                        if isFinal {
-                            // final은 항상 보장 — pending에 적재(기존 volatile pending을 덮어씀).
-                            pending = (text, isFinal)
-                        } else if inFlight {
-                            // in-flight 중 volatile은 최신만 유지(드롭하되 pending에 최신 보관).
-                            // 단, pending이 이미 final이면 final을 보호한다.
-                            if pending?.isFinal != true {
-                                pending = (text, false)
-                            }
-                            await self.logSkip()
-                            continue
-                        } else {
-                            pending = (text, false)
-                        }
-                        if !inFlight {
-                            await drain()
-                        }
+                        guard isFinal else { continue }   // volatile 재번역 깜빡임 제거
+                        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { continue }
+                        let out = await host.translate(text) ?? text
+                        continuation.yield(.segment(text: out, isFinal: true))
+                        await self.logRequest(text: text, isFinal: true)
                     case .info(let msg):
                         continuation.yield(.info(msg))
                     case .failure(let reason):
                         continuation.yield(.failure(reason))
                     }
                 }
-                // 입력 종료 — 남은 pending(특히 final) 마무리.
-                await drain()
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -103,13 +77,6 @@ actor AppleTranslationStage: TextTransformStage {
         if isFinal || reqLogCount == 1 || reqLogCount % 25 == 0 {
             let preview = text.count > 40 ? String(text.prefix(40)) + "…" : text
             Self.log.debug("\(LogTag.translate, privacy: .public) 번역 요청 final=\(isFinal, privacy: .public) n=\(self.reqLogCount, privacy: .public) src=\"\(preview, privacy: .public)\"")
-        }
-    }
-
-    private func logSkip() {
-        skipLogCount += 1
-        if skipLogCount == 1 || skipLogCount % 50 == 0 {
-            Self.log.debug("\(LogTag.translate, privacy: .public) volatile 스킵(in-flight) 누적=\(self.skipLogCount, privacy: .public)")
         }
     }
 }
