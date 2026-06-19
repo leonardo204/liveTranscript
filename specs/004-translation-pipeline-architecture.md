@@ -568,7 +568,8 @@ tearDown에서 **반드시** 순서대로 수행(누락 시 누수):
 
 ## 10. 마이그레이션 계획 (단계적·비파괴)
 
-- **P0 — 이벤트/프로토콜 도입(무동작변경)**: `PipelineEvent`, `TranslationProvider`, `EngineCapabilities` 추가. `GeminiLiveStage`로 현 클라이언트 래핑, `IntegratedTranslationProvider`로 노출. `AppState`를 provider 기반으로 전환하되 **kind=geminiLive 고정** → 동작 100% 동일. (검증: 기존 시나리오 회귀 없음)
+- **P0 — 이벤트/프로토콜 도입(무동작변경)**: ✅ **구현 완료**(커밋 1d77028). `PipelineEvent`/`TranslationProvider`/`EngineCapabilities` 추가, `GeminiTranslationProvider`(actor 어댑터)로 현 클라이언트 래핑, `TranslationProviderFactory`(kind=geminiLive 고정), `AppState`를 provider 기반으로 전환. 동작 100% 동일, BUILD SUCCEEDED.
+- **§7 동시성 일반화** — ✅ **구현 완료**(커밋 d623287). needsGeminiReload→`ProviderConfig` 비교 핫스왑(`performProviderSwap`), epoch 펜싱, 누수 위생(performStop reset / swap flush), SHA256 keyFingerprint, `TranslationEngineKind`. reviewer 적대 검토 통과.
 - **P1 — Stage 추상 정리**: `SpeechToTextStage`/`TextTransformStage`/`SpeechSynthesisStage`와 `ComposedTranslationProvider` 추가(아직 미사용). 단위테스트용 mock Stage로 합성기 검증.
 - **P2 — 온디바이스 STT 1종**: 003 권고에 따라 1개 STT Stage 구현(소스 언어에 맞춰 FluidAudio 또는 Apple Speech). `onDeviceTranscribe`(전사 전용) 동작.
 - **P3 — 온디바이스 MT 결합**: `AppleTranslationStage` 등으로 `onDeviceTranslate` 완성(키 없이 번역).
