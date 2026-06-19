@@ -100,10 +100,17 @@ struct SubtitleOverlayView: View {
     @ViewBuilder
     private func subtitleBox(translation: String, source: String, style: SubtitleStyle, maxBoxWidth: CGFloat) -> some View {
         VStack(alignment: style.align.frameAlignment.horizontal, spacing: 6) {
-            // 번역 줄: lineLimit=maxLines + .head 절단(StyledSubtitleText 기본)으로 **마지막 maxLines개
-            // 화면 줄**만 보인다. roll-up 모드는 엔진이 누적 문장을 줄바꿈으로 이어 주므로, 넘치는
-            // 오래된 줄은 위에서부터 밀려난다 → "최대 줄수 = 화면 줄수"가 정확히 지켜진다.
-            StyledSubtitleText(text: translation, size: style.fontSize, style: style)
+            if engine.segmentMode {
+                // roll-up: 누적 문장을 전부 렌더한 뒤, **maxLines 줄 높이로 컨테이너를 제한 + 하단 정렬
+                // + 클립**한다 → 최신 문장이 아래에, 넘치는 오래된 줄은 위로 스크롤아웃된다.
+                // (SwiftUI lineLimit은 '앞' N줄을 남겨 최신이 안 보이므로 쓰지 않고, 높이 클립으로 처리.)
+                // 내용이 maxLines보다 적으면 frame이 내용 높이로 줄어 위쪽 빈 공간이 생기지 않는다.
+                StyledSubtitleText(text: translation, size: style.fontSize, style: style, unlimitedLines: true)
+                    .frame(maxHeight: style.lineHeight * CGFloat(max(1, style.maxLines)), alignment: .bottom)
+                    .clipped()
+            } else {
+                StyledSubtitleText(text: translation, size: style.fontSize, style: style)
+            }
             if settings.showSourceText, !source.isEmpty {
                 StyledSubtitleText(text: source, size: style.fontSize * 0.65, style: style)
                     .opacity(0.85)

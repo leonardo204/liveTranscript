@@ -136,6 +136,15 @@ struct SubtitleStyle {
         if fontName.isEmpty { return .system(size: size, weight: weight, design: .rounded) }
         return Font.custom(fontName, size: size).weight(weight)
     }
+
+    /// 한 줄의 렌더 높이(roll-up 클립 높이 계산용). NSLayoutManager 기준이라 SwiftUI 렌더와 근사.
+    /// 본문 폰트(fontSize) 기준. 커스텀 폰트면 해당 폰트, 없으면 시스템 폰트.
+    var lineHeight: CGFloat {
+        let nsFont = fontName.isEmpty
+            ? NSFont.systemFont(ofSize: fontSize)
+            : (NSFont(name: fontName, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize))
+        return NSLayoutManager().defaultLineHeight(for: nsFont)
+    }
 }
 
 // MARK: - 공유 렌더링 뷰 (오버레이 = 미리보기)
@@ -146,17 +155,18 @@ struct StyledSubtitleText: View {
     let text: String
     let size: CGFloat
     let style: SubtitleStyle
+    /// true면 줄수 제한 없이 전부 렌더한다(roll-up: 상위에서 maxLines 높이로 하단 정렬 클립).
+    /// false(기본)면 style.maxLines로 제한(delta/Gemini·원문 줄 등).
+    var unlimitedLines: Bool = false
 
     var body: some View {
         // modifier 체이닝의 타입 추론 부담을 줄이기 위해 단계적 변수 + 조건 분기로 처리.
-        // lineLimit(maxLines) + .head: 넘치는 텍스트는 **앞(오래된) 줄부터** 잘려 마지막 maxLines
-        // 화면 줄만 보인다 → roll-up 자막이 "최대 줄수"를 정확히 지킨다.
         let base = Text(text)
             .font(style.font(size: size))
             .foregroundStyle(style.textColor)
             .multilineTextAlignment(style.align.textAlignment)
-            .lineLimit(style.maxLines)
-            .truncationMode(.head)
+            .lineLimit(unlimitedLines ? nil : style.maxLines)
+            .truncationMode(.tail)
 
         return base
             .modifier(StrokeShadowModifier(enabled: style.strokeEnabled, color: style.strokeColor))
