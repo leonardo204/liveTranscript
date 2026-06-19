@@ -463,9 +463,14 @@ struct SettingsView: View {
             ))
 
             // 원문 표시는 모델이 원문 전사를 생산할 때만 활성(spec 005 §5.3).
+            // 변경 시 재연결(핫스왑) — provider 생성 시점에 원문 전사 요청 여부(showSource)가 박히므로
+            // 번역 중이면 즉시 새 구성으로 갈아끼워야 원문 자막이 켜지고/꺼진다(spec 007).
             Toggle("원문 동시 표시", isOn: Binding(
                 get: { settings.showSourceText },
-                set: { settings.showSourceText = $0 }
+                set: {
+                    settings.showSourceText = $0
+                    appState.reloadTranslationSession()
+                }
             ))
             .disabled(!appState.selectedModel.capabilities.sourceText)
             if !appState.selectedModel.capabilities.sourceText {

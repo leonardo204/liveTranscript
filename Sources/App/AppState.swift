@@ -596,11 +596,13 @@ final class AppState {
             subtitles.ingestTranslationDelta(delta)
         case .sourceText(let delta):
             subtitles.ingestSourceDelta(delta)
-        case .sourceSegment(let text, let isFinal):
-            // 세그먼트(교체) 경로 — STT/MT 엔진(spec 007 §5). 원문 줄만 갱신(번역 줄은 유지=nil).
-            subtitles.ingestSegment(translation: nil, source: text, isFinal: isFinal)
+        case .sourceSegment(let text, _):
+            // 세그먼트(교체) 경로 — STT/MT 엔진(spec 007 §5). 원문은 **라이브 표시만**(확정 안 함):
+            // isFinal을 무시(false 고정)해 원문 final이 turn을 확정/페이드시키지 않게 한다. 턴 확정은
+            // 번역 세그먼트(translatedSegment.isFinal)가 단독으로 주도한다(원문·번역 이중 확정 방지).
+            subtitles.ingestSegment(translation: nil, source: text, isFinal: false)
         case .translatedSegment(let text, let isFinal):
-            // 번역 줄만 갱신(원문 줄은 유지=nil). 메인 자막은 번역 세그먼트가 채운다.
+            // 번역 줄만 갱신(원문 줄은 유지=nil). 메인 자막은 번역 세그먼트가 채우고, 확정도 여기서.
             subtitles.ingestSegment(translation: text, source: nil, isFinal: isFinal)
         case .turnComplete:
             subtitles.ingestTurnComplete()
