@@ -23,7 +23,8 @@ updated: 2026-06-19
 - **딜리버리**: `onDeviceTranslate` 모델 1종 — "오프라인 번역(Apple)". 키 불필요.
 - **STT**: `SpeechTranscriber`+`SpeechAnalyzer`(macOS 26+). 15~25 폴백(SFSpeechRecognizer)은 **후속**.
 - **MT**: `TranslationSession`(Translation framework, macOS 15+, 온디바이스).
-- **최소 OS**: deploymentTarget **15.0**(project.yml). Apple Speech 모델은 **minOS 26**으로 카탈로그 게이팅(15~25에선 비활성+안내).
+- **최소 OS**: deploymentTarget **26.0(Tahoe)** (사용자 결정 변경 — 이전 버전은 OS가 실행 차단).
+  → SpeechTranscriber/SpeechAnalyzer/Translation이 항상 가용하므로 `@available(macOS 26)` 분기/15~25 폴백/minOS 게이팅이 **불필요**(infra는 향후용으로 유지하되 현재 모델은 전부 가용).
 - 기존 Gemini/통합형 경로는 무손상.
 
 ## 2. 아키텍처 — P1-A Stage를 실제 구현
