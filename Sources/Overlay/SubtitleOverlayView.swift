@@ -26,13 +26,10 @@ struct SubtitleOverlayView: View {
         let verticalPosition = settings.subtitleVerticalPosition
         let style = SubtitleStyle(settings: settings)
 
-        // GeometryReader로 화면 폭을 읽어 자막 박스의 최대 폭을 제한한다.
-        // 박스가 전체 폭으로 퍼지면 긴 번역(예: 84자)이 한 줄로 나와 lineLimit이
-        // 적용되지 않으므로, 박스를 화면 폭의 70%(최소 400pt)로 제한해 텍스트가
-        // 자연스럽게 여러 줄로 줄바꿈되어 lineLimit(maxLines)까지 표시되게 한다.
+        // 박스 최대 폭 = 가용 폭 전체(바깥 좌우 패딩이 여백 역할). 좁은 중앙 박스로 묶지 않는다.
+        // (roll-up은 줄수를 높이 클립으로 제어하므로, 폭을 좁혀 강제 줄바꿈할 필요가 없다.)
         GeometryReader { geo in
-            // 박스 최대 폭: 화면 폭의 70%, 단 너무 좁아지지 않도록 400pt 하한.
-            let maxBoxWidth = max(400, geo.size.width * 0.7)
+            let maxBoxWidth = geo.size.width
 
             // 화면을 상/중/하 3등분하고, 영역 안에서 offset(0~1)으로 완전 이동시킨다.
             // 전역 비율 t = (영역index + offset) / 3  →  0~1 (화면 전체 기준).
