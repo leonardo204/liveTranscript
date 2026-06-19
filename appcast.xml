@@ -6,6 +6,16 @@
     <description>liveTranslate 업데이트 피드</description>
     <language>ko</language>
     <item>
+      <title>liveTranslate 0.3.0</title>
+      <link>https://github.com/leonardo204/liveTranscript/releases/tag/v0.3.0</link>
+      <sparkle:version>3</sparkle:version>
+      <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Fri, 19 Jun 2026 09:24:08 +0900</pubDate>
+      <enclosure url="https://github.com/leonardo204/liveTranscript/releases/download/v0.3.0/liveTranslate-0.3.0.dmg"
+                 sparkle:edSignature="p0GSRlsUeoLfvN0ZutzDSLzS2w1Iqr/4lZ1EYV2Uj2UCgldQ9RyPgonCZKnM2WHWeheGXzpAts/8A14icu36CQ==" length="5523687" type="application/octet-stream"/>
+    </item>
+    <item>
       <title>liveTranslate 0.2.0</title>
       <link>https://github.com/leonardo204/liveTranscript/releases/tag/v0.2.0</link>
       <sparkle:version>2</sparkle:version>
