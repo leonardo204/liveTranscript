@@ -25,4 +25,8 @@ enum LogTag {
     static let subtitle = "[Subtitle]"
     /// 비용 — 사용량 누적.
     static let cost = "[Cost]"
+    /// 온디바이스 STT(Apple SpeechTranscriber/SpeechAnalyzer) — 권한/모델설치/세그먼트.
+    static let speech = "[Speech]"
+    /// 온디바이스 번역(Apple Translation/TranslationSession) — 세션/가용성/번역 요청.
+    static let translate = "[Translate]"
 }

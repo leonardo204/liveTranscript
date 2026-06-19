@@ -24,11 +24,22 @@ struct TranslationProviderFactory {
                 capabilities: desc.engineCapabilities
             )
         case .onDeviceTranslate:
-            // spec 007: 엔진-무관 스캐폴딩(§7.2)까지 완료. 실제 AppleSpeechSTTStage/AppleTranslationStage
-            // (§7.3/§7.4)는 미구현이므로 현재는 nil 반환 → 호출자가 "준비 중"으로 정지 수렴한다.
-            // (OS 미달 모델은 애초에 UI에서 비활성이라 여기 도달하지 않는다.)
-            Self.log.info("\(LogTag.factory, privacy: .public) onDeviceTranslate 준비 중(엔진 미구현) — engine=\(desc.engine.rawValue, privacy: .public)")
-            return nil
+            // spec 007 §7.3/§7.4/§7.5: Apple Speech 전사 + Apple Translation 합성(키 불필요, 오프라인).
+            // deploymentTarget=26.0이라 SpeechTranscriber/SpeechAnalyzer/Translation 항상 가용(@available 불필요).
+            let host = TranslationSessionHost()
+            let stt = AppleSpeechSTTStage(sourceLocaleIdentifier: settings.sourceLanguageCode)
+            let transform = AppleTranslationStage(
+                sourceLanguageCode: settings.sourceLanguageCode,
+                targetLanguageCode: settings.targetLanguageCode,
+                host: host
+            )
+            Self.log.info("\(LogTag.factory, privacy: .public) make — engine=\(desc.engine.rawValue, privacy: .public) src=\(settings.sourceLanguageCode, privacy: .public) tgt=\(settings.targetLanguageCode, privacy: .public) (Apple Speech+Translation, 키 불필요)")
+            return ComposedTranslationProvider(
+                stt: stt,
+                transform: transform,
+                showSource: settings.showSourceText,
+                capabilities: desc.engineCapabilities
+            )
         case .onDeviceTranscribe:
             Self.log.info("\(LogTag.factory, privacy: .public) unsupported engine — engine=\(desc.engine.rawValue, privacy: .public) (준비 중)")
             return nil   // spec 003 미적용 — 호출자가 "준비 중"으로 정지 수렴.
