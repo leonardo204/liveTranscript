@@ -132,7 +132,7 @@ actor GeminiLiveClient {
     /// 번역 출력 오디오 재생 플래그를 갱신한다(AppState가 설정 변경/시작 시 호출).
     func setPlaybackEnabled(_ on: Bool) {
         guard playbackEnabled != on else { return }
-        log.info("setPlaybackEnabled 변경: \(self.playbackEnabled, privacy: .public) → \(on, privacy: .public)")
+        log.info("\(LogTag.gemini, privacy: .public) setPlaybackEnabled 변경: \(self.playbackEnabled, privacy: .public) → \(on, privacy: .public)")
         playbackEnabled = on
     }
 
@@ -265,7 +265,7 @@ actor GeminiLiveClient {
             // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): state!=ready라 청크 드롭. 드롭이 잦으면 그 자체가 신호.
             sendAudioDropCount += 1
             if sendAudioDropCount == 1 || sendAudioDropCount % 50 == 0 {
-                log.debug("sendAudio 드롭: 이유=state(\(Self.stateLabel(self.state), privacy: .public)) samples=\(chunk.count, privacy: .public) 누적드롭=\(self.sendAudioDropCount, privacy: .public)")
+                log.debug("\(LogTag.gemini, privacy: .public) sendAudio 드롭: 이유=state(\(Self.stateLabel(self.state), privacy: .public)) samples=\(chunk.count, privacy: .public) 누적드롭=\(self.sendAudioDropCount, privacy: .public)")
             }
             return
         }
@@ -277,7 +277,7 @@ actor GeminiLiveClient {
         if clientVADEnabled, activitySegmentActive, let started = segmentStartedAt,
            Date().timeIntervalSince(started) >= maxActivitySegmentSeconds {
             endActivitySegment()   // activityEnd 전송 + activitySegmentActive=false + segmentStartedAt=nil
-            log.info("연속 발화 \(self.maxActivitySegmentSeconds, privacy: .public)s 초과 → 강제 turn 경계(activityEnd)")
+            log.info("\(LogTag.gemini, privacy: .public) 연속 발화 \(self.maxActivitySegmentSeconds, privacy: .public)s 초과 → 강제 turn 경계(activityEnd)")
         }
         // 클라이언트 VAD 모드: 세그먼트가 비활성이면 오디오 전송 직전에 activityStart를 보낸다.
         // 같은 actor 메서드 안에서 순차 전송하므로 activityStart → audio 순서가 자연 보장된다.
@@ -285,12 +285,12 @@ actor GeminiLiveClient {
             sendActivityStart()
             activitySegmentActive = true
             segmentStartedAt = Date()   // 강제 분절 경과 측정 기준점
-            log.debug("activityStart 전송(발화 세그먼트 시작)")
+            log.debug("\(LogTag.gemini, privacy: .public) activityStart 전송(발화 세그먼트 시작)")
         }
         // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): state==ready라 송신.
         sendAudioCount += 1
         if sendAudioCount == 1 || sendAudioCount % 50 == 0 {
-            log.debug("sendAudio 송신: samples=\(chunk.count, privacy: .public) 누적송신=\(self.sendAudioCount, privacy: .public)")
+            log.debug("\(LogTag.gemini, privacy: .public) sendAudio 송신: samples=\(chunk.count, privacy: .public) 누적송신=\(self.sendAudioCount, privacy: .public)")
         }
         // 비용 입력 추정(태스크 C): 실제 송신하는 청크의 샘플 수를 방출한다(정확한 누적 시간 근거).
         emit(.sentAudio(sampleCount: chunk.count))
@@ -331,7 +331,7 @@ actor GeminiLiveClient {
         segmentStartedAt = nil   // 세그먼트 종료 — 경과 측정 기준점 정리
         sendActivityEnd()
         segmentIdleTask = nil
-        log.debug("activityEnd 전송(무음 \(self.segmentIdleSeconds, privacy: .public)s)")
+        log.debug("\(LogTag.gemini, privacy: .public) activityEnd 전송(무음 \(self.segmentIdleSeconds, privacy: .public)s)")
     }
 
     /// activityStart 신호 전송(발화 세그먼트 시작). state==ready/ task 존재 가드.
@@ -485,7 +485,7 @@ actor GeminiLiveClient {
         let decoder = JSONDecoder()
         guard let msg = try? decoder.decode(ServerMessage.self, from: data) else {
             // 알 수 없는 메시지는 무시(스펙 프리뷰 — 미지 필드 허용).
-            log.debug("미해석 서버 메시지 \(data.count) bytes")
+            log.debug("\(LogTag.gemini, privacy: .public) 미해석 서버 메시지 \(data.count) bytes")
             return
         }
 
@@ -520,11 +520,11 @@ actor GeminiLiveClient {
                 if hasAudio {
                     modelTurnAudioCount += 1
                     if modelTurnAudioCount == 1 || modelTurnAudioCount % 50 == 0 {
-                        log.info("modelTurn 수신: parts=\(parts.count) mimes=\(mimes.joined(separator: ","), privacy: .public)")
+                        log.debug("\(LogTag.gemini, privacy: .public) modelTurn 수신: parts=\(parts.count) mimes=\(mimes.joined(separator: ","), privacy: .public)")
                     }
                 } else if !loggedTextOnlyTurn {
                     loggedTextOnlyTurn = true
-                    log.info("modelTurn 오디오 없음(텍스트 전용): parts=\(parts.count)")
+                    log.info("\(LogTag.gemini, privacy: .public) modelTurn 오디오 없음(텍스트 전용): parts=\(parts.count)")
                 }
             }
             // modelTurn의 inlineData(출력 오디오 24kHz mono Int16 LE PCM).
@@ -539,26 +539,26 @@ actor GeminiLiveClient {
                     // A1: 첫 청크 및 N회마다 emit 바이트수만 로그(데이터 내용 미포함).
                     outputAudioEmitCount += 1
                     if outputAudioEmitCount == 1 || outputAudioEmitCount % 50 == 0 {
-                        log.debug("outputAudio emit: \(decoded.count) bytes")
+                        log.debug("\(LogTag.gemini, privacy: .public) outputAudio emit: \(decoded.count) bytes")
                     }
                     emit(.outputAudio(decoded))
                 }
             }
             // interrupted: 서버가 진행 중 응답을 중단함 → 소비자에게 즉시 정리 신호를 보낸다.
             if content.interrupted == true {
-                log.info("interrupted 수신")
+                log.info("\(LogTag.gemini, privacy: .public) interrupted 수신")
                 emit(.interrupted)
             }
             // generation(재번역 단위) 종료: turnComplete보다 먼저 처리해, 같은 메시지에 둘 다
             // 실릴 경우에도 소비자가 generation 경계를 turn 확정 전에 인지하도록 한다.
             // translate 모델의 revise 반복을 generation 경계로 끊기 위한 보조 신호.
             if content.generationComplete == true {
-                log.info("generationComplete 수신")
+                log.info("\(LogTag.gemini, privacy: .public) generationComplete 수신")
                 emit(.generationComplete)
             }
             // 턴 종료는 별도 .turnComplete 이벤트로 명시 전달 — 빈 문자열 emit 같은 혼란을 없앤다.
             if content.turnComplete == true {
-                log.info("turnComplete 수신")
+                log.info("\(LogTag.gemini, privacy: .public) turnComplete 수신")
                 emit(.turnComplete)
             }
         }
@@ -567,7 +567,7 @@ actor GeminiLiveClient {
         // responseTokensDetails(AUDIO) 우선, 없으면 responseTokenCount 폴백.
         if let usage = msg.usageMetadata, let outputTokens = usage.outputAudioTokens, outputTokens > 0 {
             // 진단: 토큰 수만 로그(턴 단위 저빈도 — 매번). 텍스트/키 미포함.
-            log.debug("usageMetadata: outputTokens=\(outputTokens, privacy: .public) total=\(usage.totalTokenCount ?? 0, privacy: .public)")
+            log.debug("\(LogTag.gemini, privacy: .public) usageMetadata: outputTokens=\(outputTokens, privacy: .public) total=\(usage.totalTokenCount ?? 0, privacy: .public)")
             emit(.outputTokens(outputTokens))
         }
 
@@ -584,7 +584,7 @@ actor GeminiLiveClient {
             }
             resumptionUpdateCount += 1
             if resumptionUpdateCount % 50 == 1 {
-                log.debug("sessionResumptionUpdate 수신 (누적 \(self.resumptionUpdateCount)회, 핸들 보관됨)")
+                log.debug("\(LogTag.gemini, privacy: .public) sessionResumptionUpdate 수신 (누적 \(self.resumptionUpdateCount)회, 핸들 보관됨)")
             }
         }
     }
@@ -595,7 +595,7 @@ actor GeminiLiveClient {
         guard !stopped else { return }
         // 키가 섞일 수 있는 원문 대신 도메인/코드만 로깅.
         let ns = error as NSError
-        log.error("송신 오류 (\(ns.domain, privacy: .public) \(ns.code)) → 재연결 시도")
+        log.error("\(LogTag.gemini, privacy: .public) 송신 오류 (\(ns.domain, privacy: .public) \(ns.code)) → 재연결 시도")
         // setup이 보내진 정상 운영 중 송신 실패만 일시적 끊김으로 본다.
         Task { await handleDisconnect(transient: setupSent) }
     }
@@ -669,7 +669,7 @@ actor GeminiLiveClient {
     private func handleDisconnect(transient: Bool) async {
         guard !stopped else { return }
         // A1: 끊김 진입을 transient/연속 실패 카운트와 함께 로그(재연결 storm 추적).
-        log.error("handleDisconnect transient=\(transient) attempts=\(self.connectAttempts)")
+        log.error("\(LogTag.gemini, privacy: .public) handleDisconnect transient=\(transient) attempts=\(self.connectAttempts)")
         teardownSocket()
 
         // B1[무한 재연결 storm 차단]: transient(setupSent=true) 끊김도 항상 카운트한다.
@@ -683,7 +683,7 @@ actor GeminiLiveClient {
         // 핸들로 재개 시도가 핸드셰이크 단계에서 실패하면 핸들이 만료/무효일 수 있으므로
         // 폐기하고 다음 시도는 새 세션으로 진행한다(영구 실패 방지). 핸들 폐기 방어는 유지.
         if resumptionHandle != nil {
-            log.info("재개 핸들로 연결 실패 → 핸들 폐기 후 새 세션 재시도")
+            log.info("\(LogTag.gemini, privacy: .public) 재개 핸들로 연결 실패 → 핸들 폐기 후 새 세션 재시도")
             resumptionHandle = nil
         }
         if connectAttempts > maxConnectAttempts {

@@ -119,18 +119,18 @@ actor VADGate {
             // 반환한다. 우리 actor에서 직접 .initial()을 쓰면 동일 결과 + 격리 hop 불필요.
             self.streamState = .initial()
             setStatus(.ready)
-            logger.info("VAD model ready (frameSize=\(Self.frameSize))")
+            logger.info("\(LogTag.audio, privacy: .public) VAD model ready (frameSize=\(Self.frameSize))")
         } catch {
             self.manager = nil
             self.streamState = nil
             setStatus(.unavailable)
-            logger.error("VAD model load failed, degrading to bypass: \(error.localizedDescription)")
+            logger.error("\(LogTag.audio, privacy: .public) VAD model load failed, degrading to bypass: \(error.localizedDescription)")
         }
     }
 
     /// 스트림 상태를 초기화한다(캡처 재시작 시). 모델은 유지, 버퍼/상태만 리셋.
     func resetStream() {
-        logger.info("resetStream: 스트림 상태 초기화 (speaking=\(self.speaking, privacy: .public) pending=\(self.pending.count, privacy: .public))")
+        logger.info("\(LogTag.audio, privacy: .public) resetStream: 스트림 상태 초기화 (speaking=\(self.speaking, privacy: .public) pending=\(self.pending.count, privacy: .public))")
         if manager != nil {
             streamState = .initial()
         }
@@ -167,7 +167,7 @@ actor VADGate {
             pending.removeFirst()
             droppedCount += 1
             if droppedCount == 1 || droppedCount % 10 == 0 {
-                logger.warning("VAD backpressure: dropped oldest chunk (total dropped=\(self.droppedCount))")
+                logger.warning("\(LogTag.audio, privacy: .public) VAD backpressure: dropped oldest chunk (total dropped=\(self.droppedCount))")
             }
         }
 
@@ -224,16 +224,16 @@ actor VADGate {
                         onSpeechStateChange(true)
                         // pre-roll: 직전 프레임을 먼저 흘려 첫 음절 잘림 방지.
                         if let pre = prevFrame {
-                            logger.info("발화 시작(speech onset) — pre-roll 프레임 flush(\(pre.count, privacy: .public) samples)")
+                            logger.debug("\(LogTag.audio, privacy: .public) 발화 시작(speech onset) — pre-roll 프레임 flush(\(pre.count, privacy: .public) samples)")
                             onSpeechChunk(pre)
                         } else {
-                            logger.info("발화 시작(speech onset) — pre-roll 없음")
+                            logger.debug("\(LogTag.audio, privacy: .public) 발화 시작(speech onset) — pre-roll 없음")
                         }
                     }
                 case .speechEnd:
                     if speaking {
                         speaking = false
-                        logger.info("발화 종료(speech offset)")
+                        logger.info("\(LogTag.audio, privacy: .public) 발화 종료(speech offset)")
                         onSpeechStateChange(false)
                     }
                 }
@@ -244,13 +244,13 @@ actor VADGate {
                 // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): 발화 프레임 통과.
                 forwardFrameCount += 1
                 if forwardFrameCount == 1 || forwardFrameCount % 50 == 0 {
-                    logger.debug("발화 프레임 통과: 누적 \(self.forwardFrameCount, privacy: .public)프레임")
+                    logger.debug("\(LogTag.audio, privacy: .public) 발화 프레임 통과: 누적 \(self.forwardFrameCount, privacy: .public)프레임")
                 }
                 onSpeechChunk(frame)
             }
         } catch {
             // 추론 실패 시 안전하게 forward(언더-블로킹 < 오버-블로킹: 자막 누락 방지).
-            logger.error("VAD inference failed, forwarding frame: \(error.localizedDescription)")
+            logger.error("\(LogTag.audio, privacy: .public) VAD inference failed, forwarding frame: \(error.localizedDescription)")
             onSpeechChunk(frame)
         }
 

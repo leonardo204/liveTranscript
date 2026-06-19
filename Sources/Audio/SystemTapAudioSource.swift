@@ -126,7 +126,7 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
         guard status == noErr, newTapID != AudioObjectID(kAudioObjectUnknown) else {
             // 권한 거부/대기 시 tap 생성이 실패할 수 있다 → 권한 안내로 graceful 처리.
             lastErrorWasPermission = true
-            logger.error("AudioHardwareCreateProcessTap failed: \(status)")
+            logger.error("\(LogTag.audio, privacy: .public) AudioHardwareCreateProcessTap failed: \(status)")
             throw AudioSourceError.systemTapCreationFailed(status)
         }
         tapID = newTapID
@@ -182,7 +182,7 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
         var newAggregateID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &newAggregateID)
         guard status == noErr, newAggregateID != AudioObjectID(kAudioObjectUnknown) else {
-            logger.error("AudioHardwareCreateAggregateDevice failed: \(status)")
+            logger.error("\(LogTag.audio, privacy: .public) AudioHardwareCreateAggregateDevice failed: \(status)")
             throw AudioSourceError.systemTapAggregateFailed(status)
         }
         aggregateID = newAggregateID
@@ -200,7 +200,7 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &asbd)
         guard status == noErr, asbd.mSampleRate > 0, asbd.mChannelsPerFrame > 0 else {
-            logger.error("read kAudioTapPropertyFormat failed: \(status)")
+            logger.error("\(LogTag.audio, privacy: .public) read kAudioTapPropertyFormat failed: \(status)")
             throw AudioSourceError.systemTapFormatFailed(status)
         }
         return asbd
@@ -237,7 +237,7 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
         var newProcID: AudioDeviceIOProcID?
         let status = AudioDeviceCreateIOProcIDWithBlock(&newProcID, aggregateID, ioQueue, block)
         guard status == noErr, let procID = newProcID else {
-            logger.error("AudioDeviceCreateIOProcIDWithBlock failed: \(status)")
+            logger.error("\(LogTag.audio, privacy: .public) AudioDeviceCreateIOProcIDWithBlock failed: \(status)")
             throw AudioSourceError.systemTapIOProcFailed(status)
         }
         ioProcID = procID
@@ -248,7 +248,7 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
     private func startIO() throws {
         let status = AudioDeviceStart(aggregateID, ioProcID)
         guard status == noErr else {
-            logger.error("AudioDeviceStart failed: \(status)")
+            logger.error("\(LogTag.audio, privacy: .public) AudioDeviceStart failed: \(status)")
             throw AudioSourceError.systemTapStartFailed(status)
         }
     }
@@ -307,9 +307,9 @@ final class SystemTapAudioSource: AudioSource, @unchecked Sendable {
         guard status != noErr else { return }
         // kAudioHardwareBadObjectError(-10877): 대상 객체가 이미 없음 → 정리 목적상 무해.
         if status == kAudioHardwareBadObjectError {
-            logger.debug("\(op): 대상 객체 없음(-10877, 무해)")
+            logger.debug("\(LogTag.audio, privacy: .public) \(op): 대상 객체 없음(-10877, 무해)")
         } else {
-            logger.error("\(op) failed: \(status)")
+            logger.error("\(LogTag.audio, privacy: .public) \(op) failed: \(status)")
         }
     }
 }

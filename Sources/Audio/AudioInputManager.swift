@@ -51,7 +51,7 @@ final class AudioInputManager {
         didSet {
             // 오류 메시지 설정 시 진단 로그(키/URL 비포함 — UI 안내 문구).
             if let msg = lastErrorMessage {
-                log.error("lastErrorMessage 설정: \(msg, privacy: .public)")
+                log.error("\(LogTag.audio, privacy: .public) lastErrorMessage 설정: \(msg, privacy: .public)")
             }
         }
     }
@@ -127,7 +127,7 @@ final class AudioInputManager {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if self.isSpeaking != speaking {
-                    self.log.info("VAD 발화 전이: \(speaking ? "발화 시작" : "발화 종료", privacy: .public)")
+                    self.log.debug("\(LogTag.audio, privacy: .public) VAD 발화 전이: \(speaking ? "발화 시작" : "발화 종료", privacy: .public)")
                 }
                 self.isSpeaking = speaking
             }
@@ -218,7 +218,7 @@ final class AudioInputManager {
 
     /// 입력 장치 선택(수동). 캡처 중이면 새 소스로 재시작한다(hot-swap).
     func selectDevice(_ device: AudioInputDevice) {
-        log.info("selectDevice: 이전=\(self.selectionLabel, privacy: .public) → 이후=device(\(device.name, privacy: .public)) isCapturing=\(self.isCapturing, privacy: .public) hotSwap=\(self.isCapturing, privacy: .public)")
+        log.info("\(LogTag.audio, privacy: .public) selectDevice: 이전=\(self.selectionLabel, privacy: .public) → 이후=device(\(device.name, privacy: .public)) isCapturing=\(self.isCapturing, privacy: .public) hotSwap=\(self.isCapturing, privacy: .public)")
         selection = .device(device.uid)
         selectedDeviceUID = device.uid
         settings?.saveInputSelection(selection)
@@ -231,7 +231,7 @@ final class AudioInputManager {
             lastErrorMessage = AudioSourceError.systemTapUnavailable.errorDescription
             return
         }
-        log.info("selectSystemTap: 이전=\(self.selectionLabel, privacy: .public) → 이후=systemTap isCapturing=\(self.isCapturing, privacy: .public) hotSwap=\(self.isCapturing, privacy: .public)")
+        log.info("\(LogTag.audio, privacy: .public) selectSystemTap: 이전=\(self.selectionLabel, privacy: .public) → 이후=systemTap isCapturing=\(self.isCapturing, privacy: .public) hotSwap=\(self.isCapturing, privacy: .public)")
         selection = .systemTap
         settings?.saveInputSelection(selection)
         restartIfCapturing()
@@ -239,7 +239,7 @@ final class AudioInputManager {
 
     /// 자동 선택으로 되돌린다(BlackHole 우선 → 시스템 Tap).
     func selectAuto() {
-        log.info("selectAuto: 이전=\(self.selectionLabel, privacy: .public) → 이후=auto isCapturing=\(self.isCapturing, privacy: .public) hotSwap=\(self.isCapturing, privacy: .public)")
+        log.info("\(LogTag.audio, privacy: .public) selectAuto: 이전=\(self.selectionLabel, privacy: .public) → 이후=auto isCapturing=\(self.isCapturing, privacy: .public) hotSwap=\(self.isCapturing, privacy: .public)")
         selection = .auto
         settings?.saveInputSelection(selection)
         restartIfCapturing()
@@ -268,16 +268,16 @@ final class AudioInputManager {
     /// 이전 소스 teardown이 새 소스 start보다 먼저 완료된다.
     private func restartIfCapturing() {
         guard isCapturing else { return }
-        log.info("restartIfCapturing: 재시작 시도(hot-swap)")
+        log.info("\(LogTag.audio, privacy: .public) restartIfCapturing: 재시작 시도(hot-swap)")
         stop()
         do {
             try start()
-            log.info("restartIfCapturing: 재시작 성공")
+            log.info("\(LogTag.audio, privacy: .public) restartIfCapturing: 재시작 성공")
         } catch {
             // -10877(kAudioUnitErr_InvalidElement 류)은 입력 전환 과도기에 흔히 발생하나 무해할 수 있다.
             let ns = error as NSError
             let harmless = ns.code == -10877 ? " (-10877 — 입력 전환 과도기, 보통 무해)" : ""
-            log.error("restartIfCapturing: 재시작 실패 code=\(ns.code, privacy: .public)\(harmless, privacy: .public)")
+            log.error("\(LogTag.audio, privacy: .public) restartIfCapturing: 재시작 실패 code=\(ns.code, privacy: .public)\(harmless, privacy: .public)")
             // start() 내부에서 lastErrorMessage가 이미 설정된다. isCapturing은 false 유지.
             // 상위(AppState)는 isRunning(사용자 의도)을 단일 진실로 쓰므로, 여기서
             // isCapturing이 false여도 "정지" 버튼이 "시작"으로 뒤집히지 않는다.
@@ -295,14 +295,14 @@ final class AudioInputManager {
         case .device: sourceLabel = "device"
         case .auto: sourceLabel = "auto"
         }
-        log.info("start() 진입: 소스=\(sourceLabel, privacy: .public) 장치=\(self.selectedDevice?.name ?? "(none)", privacy: .public) captureGeneration=\(self.captureGeneration, privacy: .public) VAD=\(self.vadEnabled ? "on" : "off", privacy: .public)")
+        log.info("\(LogTag.audio, privacy: .public) start() 진입: 소스=\(sourceLabel, privacy: .public) 장치=\(self.selectedDevice?.name ?? "(none)", privacy: .public) captureGeneration=\(self.captureGeneration, privacy: .public) VAD=\(self.vadEnabled ? "on" : "off", privacy: .public)")
 
         // 선택(자동/수동)에 따라 적절한 AudioSource 구현을 만든다.
         let source: AudioSource
         do {
             source = try makeSource()
         } catch {
-            log.error("start() 실패(makeSource): \(error.localizedDescription, privacy: .public)")
+            log.error("\(LogTag.audio, privacy: .public) start() 실패(makeSource): \(error.localizedDescription, privacy: .public)")
             throw error
         }
         let forwardBox = self.forwardBox
@@ -319,9 +319,9 @@ final class AudioInputManager {
             // 진단(고빈도 — 스로틀: 첫 1회 + 50회마다): VAD on/off 분기와 RMS 레벨.
             if forwardLogCounter.shouldLog(every: 50) {
                 if vadEnabledBox.value {
-                    log.debug("청크 수신: 분기=VAD 게이트로 제출 rms=\(rms, privacy: .public) samples=\(chunk.count, privacy: .public)")
+                    log.debug("\(LogTag.audio, privacy: .public) 청크 수신: 분기=VAD 게이트로 제출 rms=\(rms, privacy: .public) samples=\(chunk.count, privacy: .public)")
                 } else {
-                    log.debug("청크 수신: 분기=직접 forward rms=\(rms, privacy: .public) samples=\(chunk.count, privacy: .public)")
+                    log.debug("\(LogTag.audio, privacy: .public) 청크 수신: 분기=직접 forward rms=\(rms, privacy: .public) samples=\(chunk.count, privacy: .public)")
                 }
             }
             // M1b VAD 게이트: on이면 actor로 넘겨 발화 구간만 forward, off면 그대로 forward.
@@ -338,14 +338,14 @@ final class AudioInputManager {
             try source.start()
         } catch {
             lastErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            log.error("start() 실패(source.start): \(error.localizedDescription, privacy: .public)")
+            log.error("\(LogTag.audio, privacy: .public) start() 실패(source.start): \(error.localizedDescription, privacy: .public)")
             throw error
         }
 
         self.source = source
         isCapturing = true
         lastErrorMessage = nil
-        log.info("start() 성공: isCapturing=true 소스=\(sourceLabel, privacy: .public)")
+        log.info("\(LogTag.audio, privacy: .public) start() 성공: isCapturing=true 소스=\(sourceLabel, privacy: .public)")
     }
 
     /// 현재 선택(자동/수동)에 맞는 AudioSource 구현을 생성한다.
@@ -368,7 +368,7 @@ final class AudioInputManager {
     func stop() {
         // 세대 증가 → 진행 중인 비동기 권한 콜백의 늦은 start()를 무효화(좀비 캡처 방지).
         captureGeneration += 1
-        log.info("stop(): captureGeneration=\(self.captureGeneration, privacy: .public)")
+        log.info("\(LogTag.audio, privacy: .public) stop(): captureGeneration=\(self.captureGeneration, privacy: .public)")
         source?.stop()
         source = nil
         isCapturing = false
@@ -386,7 +386,7 @@ final class AudioInputManager {
     func requestPermissionAndStart() {
         if case .systemTap = effectiveSelection {
             // 시스템 오디오 직접 캡처 — 마이크 권한 단계 없이 바로 시작 시도.
-            log.info("requestPermissionAndStart: 경로=systemTap(권한 단계 없음)")
+            log.info("\(LogTag.audio, privacy: .public) requestPermissionAndStart: 경로=systemTap(권한 단계 없음)")
             refreshDevices()
             do {
                 try start()
@@ -395,7 +395,7 @@ final class AudioInputManager {
             }
             return
         }
-        log.info("requestPermissionAndStart: 경로=mic(권한 요청)")
+        log.info("\(LogTag.audio, privacy: .public) requestPermissionAndStart: 경로=mic(권한 요청)")
         // 비동기 권한 콜백은 reconciler의 직렬 불변식 밖에서 도착한다. 권한 요청 직전의
         // 세대를 캡처해 두고, 콜백에서 start() 직전에 동일 세대인지 확인한다. 그 사이
         // stop()이 호출됐다면(세대 증가) 시작을 취소해 정지 후 좀비 캡처를 막는다.
@@ -403,14 +403,14 @@ final class AudioInputManager {
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.log.info("마이크 권한 결과: \(granted ? "granted" : "denied", privacy: .public)")
+                self.log.info("\(LogTag.audio, privacy: .public) 마이크 권한 결과: \(granted ? "granted" : "denied", privacy: .public)")
                 guard granted else {
                     self.lastErrorMessage = AudioSourceError.permissionDenied.errorDescription
                     return
                 }
                 // 권한 프롬프트 동안 stop()이 끼어들었으면(세대 불일치) 시작하지 않는다.
                 guard gen == self.captureGeneration else {
-                    self.log.info("권한 콜백 늦은 start 취소: captureGeneration 가드(요청시=\(gen, privacy: .public) 현재=\(self.captureGeneration, privacy: .public))")
+                    self.log.info("\(LogTag.audio, privacy: .public) 권한 콜백 늦은 start 취소: captureGeneration 가드(요청시=\(gen, privacy: .public) 현재=\(self.captureGeneration, privacy: .public))")
                     return
                 }
                 self.refreshDevices()

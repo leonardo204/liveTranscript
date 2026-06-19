@@ -51,7 +51,7 @@ enum AudioDeviceEnumerator {
             return AudioInputDevice(id: deviceID, uid: uid, name: name)
         }
         // 진단(1회성 debug): 입력 장치 개수 + 이름 목록.
-        log.debug("inputDevices: \(devices.count, privacy: .public)개 [\(devices.map(\.name).joined(separator: ", "), privacy: .public)]")
+        log.debug("\(LogTag.audio, privacy: .public) inputDevices: \(devices.count, privacy: .public)개 [\(devices.map(\.name).joined(separator: ", "), privacy: .public)]")
         return devices
     }
 
@@ -66,7 +66,7 @@ enum AudioDeviceEnumerator {
             return AudioOutputDevice(id: deviceID, uid: uid, name: name)
         }
         // 진단(1회성 debug): 출력 장치 개수 + 이름 목록.
-        log.debug("outputDevices: \(devices.count, privacy: .public)개 [\(devices.map(\.name).joined(separator: ", "), privacy: .public)]")
+        log.debug("\(LogTag.audio, privacy: .public) outputDevices: \(devices.count, privacy: .public)개 [\(devices.map(\.name).joined(separator: ", "), privacy: .public)]")
         return devices
     }
 
@@ -75,9 +75,9 @@ enum AudioDeviceEnumerator {
         let id = outputDevices().first(where: { $0.uid == uid })?.id
         // 진단: UID 매칭 성공/실패(라우팅 실패 원인 추적).
         if let id {
-            log.debug("deviceID(forUID): 매칭 성공 uid=\(uid, privacy: .public) → id=\(id, privacy: .public)")
+            log.debug("\(LogTag.audio, privacy: .public) deviceID(forUID): 매칭 성공 uid=\(uid, privacy: .public) → id=\(id, privacy: .public)")
         } else {
-            log.debug("deviceID(forUID): 매칭 실패 uid=\(uid, privacy: .public) → 기본 출력")
+            log.debug("\(LogTag.audio, privacy: .public) deviceID(forUID): 매칭 실패 uid=\(uid, privacy: .public) → 기본 출력")
         }
         return id
     }

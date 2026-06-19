@@ -124,7 +124,7 @@ final class SubtitleEngine {
     /// 빈 조각/비정상 중복 조각은 무시한다.
     func ingestTranslationDelta(_ delta: String) {
         // 진단: delta 원문(앞 40자)과 길이 — 증분/누적/반복 전송 여부 판별용(자막 텍스트, 키 아님).
-        log.debug("번역 delta: \"\(delta.prefix(40), privacy: .public)\" len=\(delta.count)")
+        log.debug("\(LogTag.subtitle, privacy: .public) 번역 delta: \"\(delta.prefix(40), privacy: .public)\" len=\(delta.count)")
         applyPendingGenerationResetIfNeeded()
         guard appendIfMeaningful(delta, to: &currentTranslation) else { return }
         showAndCancelHide()
@@ -135,7 +135,7 @@ final class SubtitleEngine {
             let lines = settings?.subtitleMaxLines ?? 2
             let byLines = AppConfig.charsPerSubtitleLine * max(1, lines)
             let configured = settings?.subtitleMaxCharsBeforeBreak ?? 0
-            log.debug("charBreak 발생: len=\(self.currentTranslation.count, privacy: .public) 임계=\(self.maxCharsBeforeBreak, privacy: .public) (줄수=\(lines, privacy: .public) byLines=\(byLines, privacy: .public) configured=\(configured, privacy: .public))")
+            log.debug("\(LogTag.subtitle, privacy: .public) charBreak 발생: len=\(self.currentTranslation.count, privacy: .public) 임계=\(self.maxCharsBeforeBreak, privacy: .public) (줄수=\(lines, privacy: .public) byLines=\(byLines, privacy: .public) configured=\(configured, privacy: .public))")
             confirmTurn(reason: .charBreak)   // 확정 줄은 holdSeconds 유지 후 페이드 → 새 버퍼에서 다음 누적 시작.
             return
         }
@@ -145,7 +145,7 @@ final class SubtitleEngine {
     /// 원문 delta 조각 수신 → 현재 원문 줄에 누적한다. 표시/확정 타이밍은 turnComplete 기준.
     func ingestSourceDelta(_ delta: String) {
         // 진단: 피드백 루프(번역 오디오 재캡처) 여부 확인용 — 원문 delta가 한국어 번역과 같으면 피드백 신호.
-        log.debug("원문 delta: \"\(delta.prefix(40), privacy: .public)\" len=\(delta.count)")
+        log.debug("\(LogTag.subtitle, privacy: .public) 원문 delta: \"\(delta.prefix(40), privacy: .public)\" len=\(delta.count)")
         applyPendingGenerationResetIfNeeded()
         _ = appendIfMeaningful(delta, to: &currentSource)
     }
@@ -159,7 +159,7 @@ final class SubtitleEngine {
     func ingestGenerationComplete() {
         pendingGenerationReset = true
         silenceTask?.cancel(); silenceTask = nil
-        log.debug("generation 경계 — 다음 delta에서 버퍼 리셋")
+        log.debug("\(LogTag.subtitle, privacy: .public) generation 경계 — 다음 delta에서 버퍼 리셋")
     }
 
     /// generation 리셋이 대기 중이면(직전 generation/turn 종료 후 첫 delta), 직전 generation의
@@ -175,7 +175,7 @@ final class SubtitleEngine {
         currentTranslation = ""
         currentSource = ""
         pendingGenerationReset = false
-        log.debug("generation 리셋 적용: 직전 generation을 confirmed로 이동, current 비움")
+        log.debug("\(LogTag.subtitle, privacy: .public) generation 리셋 적용: 직전 generation을 confirmed로 이동, current 비움")
     }
 
     /// 턴(발화) 종료 — 누적된 현재 줄을 확정 줄로 고정하고 유지 시간 후 페이드아웃한다.
@@ -205,7 +205,7 @@ final class SubtitleEngine {
         confirmedSource = src
         pendingGenerationReset = false
         isVisible = true
-        log.debug("showPreview: 고정 미리보기 표시(타이머 없음)")
+        log.debug("\(LogTag.subtitle, privacy: .public) showPreview: 고정 미리보기 표시(타이머 없음)")
     }
 
     /// 테스트 자막 토글 OFF: 미리보기 텍스트를 비우고 즉시 숨긴다(reset과 동일 경로).
@@ -216,7 +216,7 @@ final class SubtitleEngine {
     /// 세션 정지/재시작 시 누적 텍스트를 비우고 즉시 숨긴다.
     func reset() {
         // A3: 세션 재시작 폭주 여부 확인용(짧은 간격으로 반복되면 재연결 storm 신호).
-        log.debug("자막 reset")
+        log.debug("\(LogTag.subtitle, privacy: .public) 자막 reset")
         hideTask?.cancel(); hideTask = nil
         silenceTask?.cancel(); silenceTask = nil
         currentTranslation = ""
@@ -261,9 +261,9 @@ final class SubtitleEngine {
         // 진단: 겹침 k / 새로 붙인 길이. 정리로 줄어든 경우 중복 붕괴 remark(반복/피드백 신호).
         // 길이 변화는 collapseRepeats + dedupGlobalSentences 둘을 합친 전후 길이(merged→collapsed).
         if collapsed.count < merged.count {
-            log.debug("append: 겹침k=\(k, privacy: .public) newPart=\(newPart.count, privacy: .public)자, 중복 붕괴: \(merged.count, privacy: .public)→\(collapsed.count, privacy: .public)자")
+            log.debug("\(LogTag.subtitle, privacy: .public) append: 겹침k=\(k, privacy: .public) newPart=\(newPart.count, privacy: .public)자, 중복 붕괴: \(merged.count, privacy: .public)→\(collapsed.count, privacy: .public)자")
         } else {
-            log.debug("append: 겹침k=\(k, privacy: .public) newPart=\(newPart.count, privacy: .public)자")
+            log.debug("\(LogTag.subtitle, privacy: .public) append: 겹침k=\(k, privacy: .public) newPart=\(newPart.count, privacy: .public)자")
         }
         buffer = collapsed
         return true
@@ -339,7 +339,7 @@ final class SubtitleEngine {
     /// turnComplete와 무음 fallback이 공유하는 단일 경로.
     private func confirmTurn(reason: ConfirmReason) {
         // A3: 확정 사유와 누적 길이를 함께 로그(자막이 1줄로 빨리 끊기는 원인 확정용). 텍스트 내용은 미포함.
-        log.debug("자막 확정: 사유=\(reason.rawValue, privacy: .public), len=\(self.currentTranslation.count)")
+        log.debug("\(LogTag.subtitle, privacy: .public) 자막 확정: 사유=\(reason.rawValue, privacy: .public), len=\(self.currentTranslation.count)")
         silenceTask?.cancel(); silenceTask = nil
 
         // 수정2: 확정 직전 정리를 한 번 더 적용한다. charBreak가 중복 구가 완성되기
@@ -358,7 +358,7 @@ final class SubtitleEngine {
         if !collapsedTranslation.isEmpty,
            !confirmedTranslation.isEmpty,
            norm(collapsedTranslation) == norm(confirmedTranslation) {
-            log.debug("자막 확정 무시: 직전 확정과 동일(중복 경계) len=\(collapsedTranslation.count, privacy: .public)")
+            log.debug("\(LogTag.subtitle, privacy: .public) 자막 확정 무시: 직전 확정과 동일(중복 경계) len=\(collapsedTranslation.count, privacy: .public)")
             currentTranslation = ""
             currentSource = ""
             scheduleHide()
@@ -394,7 +394,7 @@ final class SubtitleEngine {
             guard !Task.isCancelled, let self else { return }
             // 그동안 새 delta가 와서 다음 문장이 자라기 시작했으면 내리지 않는다.
             if self.currentTranslation.isEmpty {
-                self.log.debug("scheduleHide fire: isVisible=false 전이(holdSeconds 경과)")
+                self.log.debug("\(LogTag.subtitle, privacy: .public) scheduleHide fire: isVisible=false 전이(holdSeconds 경과)")
                 self.isVisible = false
             }
         }
@@ -410,7 +410,7 @@ final class SubtitleEngine {
             guard !Task.isCancelled, let self else { return }
             // 아직 확정되지 않은 누적분이 남아 있을 때만 자동 확정.
             if !self.currentTranslation.isEmpty || !self.currentSource.isEmpty {
-                self.log.debug("silence fallback fire: 무음 \(Self.silenceTimeout, privacy: .public)s 경과 → 자동 확정")
+                self.log.debug("\(LogTag.subtitle, privacy: .public) silence fallback fire: 무음 \(Self.silenceTimeout, privacy: .public)s 경과 → 자동 확정")
                 self.confirmTurn(reason: .silence)
             }
         }

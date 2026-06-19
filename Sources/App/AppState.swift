@@ -607,7 +607,7 @@ final class AppState {
             case .sentAudio(let sampleCount):
                 cost.addSentAudio(sampleCount: sampleCount)   // 입력 비용 누적(태스크 C).
             case .outputAudioTokens(let tokens):
-                log.debug("\(LogTag.appState, privacy: .public) event.outputTokens=\(tokens, privacy: .public) (비용 누적)")
+                // 출력 토큰 로그는 엔진 레이어([Gemini] usageMetadata)가 이미 남기므로 여기선 생략(중복 제거).
                 cost.addOutputTokens(tokens)                  // 출력 비용 누적(태스크 C).
             case .localCompute:
                 break   // P0 미사용(온디바이스 스테이지 비용 — P1+).
