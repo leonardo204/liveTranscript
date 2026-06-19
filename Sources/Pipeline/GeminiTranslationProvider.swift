@@ -17,22 +17,22 @@ actor GeminiTranslationProvider: TranslationProvider {
     private let client: GeminiLiveClient
     private var pumpTask: Task<Void, Never>?
 
-    init(apiKey: String, targetLanguageCode: String, requestInputTranscription: Bool) {
+    init(
+        apiKey: String,
+        model: String,
+        targetLanguageCode: String,
+        requestInputTranscription: Bool,
+        capabilities: EngineCapabilities
+    ) {
         self.client = GeminiLiveClient(
             apiKey: apiKey,
+            model: model,
             targetLanguageCode: targetLanguageCode,
             clientVADEnabled: false,
             requestInputTranscription: requestInputTranscription
         )
-        self.capabilities = EngineCapabilities(
-            producesSourceText: requestInputTranscription,
-            producesTranslatedText: true,
-            producesTranslatedAudio: true,
-            requiresAPIKey: true,
-            isStreaming: true,
-            supportedTargetLanguages: nil,
-            supportedSourceLanguages: nil
-        )
+        // 능력 선언은 모델 디스크립터에서 주입한다(카탈로그가 진실원, spec 005).
+        self.capabilities = capabilities
     }
 
     func start() async -> AsyncStream<PipelineEvent> {

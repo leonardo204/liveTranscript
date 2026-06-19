@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "id": "gemini-3.5-live-translate",
+      "displayName": "Gemini Live 3.5 Translate",
+      "summary": "Google 클라우드 실시간 음성→번역(자막+번역음성). API 키 필요.",
+      "engine": "geminiLive",
+      "modelIdentifier": "models/gemini-3.5-live-translate-preview",
+      "pipeline": "integrated",
+      "requiresAPIKey": true,
+      "available": true,
+      "capabilities": {
+        "sourceText": true,
+        "translatedText": true,
+        "translatedAudio": true,
+        "streaming": true
+      },
+      "vad": { "server": true, "clientGate": true, "default": "client" },
+      "engineSlots": { "translation": false, "llm": false },
+      "targetLanguages": null,
+      "sourceLanguages": null
+    }
+  ]
+}

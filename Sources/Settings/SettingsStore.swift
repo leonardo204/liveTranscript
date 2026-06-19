@@ -44,6 +44,8 @@ final class SettingsStore {
         static let monitorHasSavedPosition = "monitor.hasSavedPosition"
         static let targetLanguageCode = "translate.targetLanguageCode"
         static let showSourceText = "translate.showSourceText"
+        // 선택된 모델 카탈로그 id (spec 005 §4)
+        static let selectedModelID = "model.selectedID"
         // 입력 소스 선택 영속화 (태스크 A)
         static let inputSelectionKind = "input.selection.kind"   // "auto" | "systemTap" | "device"
         static let inputSelectionDeviceUID = "input.selection.deviceUID"
@@ -120,6 +122,8 @@ final class SettingsStore {
             Key.subtitleMaxCharsBeforeBreak: AppConfig.defaultMaxCharsBeforeBreak,
             // 비용 HUD 기본 on(스펙 §9.4 — 세션 비용 가시화).
             Key.costHUDEnabled: true,
+            // 선택 모델 기본값(첫 모델 id) — 카탈로그 진실원과 일치(spec 005 §4).
+            Key.selectedModelID: SettingsStore.defaultModelID,
             // 자막 스타일 기본값(M4, FR-7).
             Key.subtitleFontName: StyleDefault.fontName,
             Key.subtitleFontSize: StyleDefault.fontSize,
@@ -146,6 +150,8 @@ final class SettingsStore {
         self.targetLanguageCode =
             defaults.string(forKey: Key.targetLanguageCode) ?? AppConfig.defaultTargetLanguageCode
         self.showSourceText = defaults.bool(forKey: Key.showSourceText)
+        self.selectedModelID =
+            defaults.string(forKey: Key.selectedModelID) ?? SettingsStore.defaultModelID
         self.subtitleScreenID = defaults.object(forKey: Key.subtitleScreenID) as? Int
         self.subtitleVerticalPosition =
             SubtitleVerticalPosition(
@@ -450,6 +456,17 @@ final class SettingsStore {
         didSet { defaults.set(showSourceText, forKey: Key.showSourceText) }
     }
 
+    // MARK: - 모델 선택 (spec 005)
+
+    /// 첫 모델 id 기본값. 카탈로그 진실원(`Resources/models.json`의 첫 모델)과 일치해야 한다.
+    static let defaultModelID = "gemini-3.5-live-translate"
+
+    /// 선택된 모델 카탈로그 id. `ModelCatalog.resolved(id:)`로 디스크립터를 해석한다.
+    /// 변경 시 AppState가 핫스왑(번역 중) 또는 다음 시작에 반영한다.
+    var selectedModelID: String {
+        didSet { defaults.set(selectedModelID, forKey: Key.selectedModelID) }
+    }
+
     // MARK: - 미니 HUD(모니터) 정책
 
     /// 사용자가 모니터 표시를 명시적으로 켰는지(마스터 토글).
@@ -506,7 +523,7 @@ final class SettingsStore {
         let allKeys = [
             Key.monitorEnabled, Key.monitorAutoShowOnCapture, Key.monitorHideOnStop,
             Key.monitorFrameX, Key.monitorFrameY, Key.monitorHasSavedPosition,
-            Key.targetLanguageCode, Key.showSourceText,
+            Key.targetLanguageCode, Key.showSourceText, Key.selectedModelID,
             Key.inputSelectionKind, Key.inputSelectionDeviceUID,
             Key.subtitleMaxCharsBeforeBreak,
             Key.costHUDEnabled, Key.costCumulativeInputUSD, Key.costCumulativeOutputUSD,
@@ -534,6 +551,7 @@ final class SettingsStore {
         monitorHideOnStop = true
         targetLanguageCode = AppConfig.defaultTargetLanguageCode
         showSourceText = false
+        selectedModelID = SettingsStore.defaultModelID
         subtitleMaxCharsBeforeBreak = AppConfig.defaultMaxCharsBeforeBreak
         costHUDEnabled = true
         subtitleVerticalPosition = .bottom

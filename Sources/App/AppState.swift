@@ -65,7 +65,7 @@ final class AppState {
     /// 현재 살아있는 번역 제공자(추상). 정지 시 해제. (spec 004 P0: GeminiLiveClient를 직접 보유하지 않고
     /// TranslationProvider 추상 뒤에 둔다 — 엔진 교체/스테이지 합성에 무손상 대응.)
     @ObservationIgnored private var provider: (any TranslationProvider)?
-    /// 설정+키로부터 provider를 만드는 팩토리(P0: geminiLive 고정).
+    /// 설정+키로부터 provider를 만드는 팩토리. 선택 모델(ModelCatalog) engine으로 분기(spec 005).
     @ObservationIgnored private let providerFactory = TranslationProviderFactory()
     /// 수신 이벤트 소비 Task.
     @ObservationIgnored private var eventTask: Task<Void, Never>?
@@ -306,17 +306,25 @@ final class AppState {
     /// 값 비교로 핫스왑을 판정한다. 키는 평문이 아니라 실행 내 안정 지문으로만 비교한다.
     private struct ProviderConfig: Equatable {
         var engine: TranslationEngineKind
+        var modelID: String
         var targetLanguage: String
         var showSource: Bool
         var keyFingerprint: String?
+    }
+
+    /// 현재 선택된 모델 디스크립터(SettingsView 능력 게이팅용, spec 005 §5.3).
+    var selectedModel: ModelDescriptor {
+        ModelCatalog.shared.resolved(id: settings.selectedModelID)
     }
 
     /// 설정+키로부터 "원하는 구성"을 계산한다. keyFingerprint는 키 평문이 아니라
     /// **결정적 SHA256 다이제스트**라 비교/로그에 안전하고, 다른 키면 항상 다른 값이 보장된다.
     /// (String.hashValue는 프로세스마다 SipHash 시드가 랜덤이라 충돌 시 키 교체를 놓칠 수 있어 회피.)
     private func currentDesiredConfig() -> ProviderConfig {
-        ProviderConfig(
-            engine: .geminiLive,   // P0/§7: 고정(P2에서 설정 기반 분기로 확장).
+        let model = ModelCatalog.shared.resolved(id: settings.selectedModelID)
+        return ProviderConfig(
+            engine: model.engine,
+            modelID: model.id,   // 모델 변경 시 config diff → 핫스왑(spec 005 §4.1).
             targetLanguage: settings.targetLanguageCode,
             showSource: settings.showSourceText,
             keyFingerprint: geminiAPIKey().map(Self.fingerprint)
@@ -389,7 +397,15 @@ final class AppState {
         }
         log.info("performStart: 키 있음 → 캡처+Gemini 시작")
         lastFailureReason = nil   // 새 세션 시작 → 직전 영구 실패 사유 클리어(정지 라벨 오염 방지)
-        startGemini(apiKey: key)
+        // 미지원 엔진(준비 중)이면 캡처를 시작하지 않고 의도를 정지로 되돌려 안전 수렴한다(spec 005 §4).
+        guard startGemini(apiKey: key) else {
+            log.error("performStart 중단: 모델 엔진 미지원 → 의도 정지로 복귀")
+            desiredRunning = false
+            isRunning = false
+            actualRunning = false
+            actualConfig = nil
+            return
+        }
         audio.requestPermissionAndStart()
         // 권한 콜백 후 isCapturing이 true가 된다. UI는 isRunning(버튼 상태)과
         // audio.isCapturing(실제 캡처 표시)을 각각 관찰한다.
@@ -447,7 +463,16 @@ final class AppState {
             return
         }
         log.info("performProviderSwap: 키 있음 → provider 재시작(새 구성)")
-        startGemini(apiKey: key)
+        // 미지원 엔진으로 핫스왑되면 정지로 수렴한다(캡처도 다음 performStop이 내림).
+        guard startGemini(apiKey: key) else {
+            log.error("performProviderSwap 중단: 모델 엔진 미지원 → 정지로 수렴")
+            desiredRunning = false
+            isRunning = false
+            actualConfig = nil
+            translatedAudioPlayer.stop()
+            systemAudioDucker.restore()
+            return
+        }
         // 자막/오디오 정책은 그대로 유지(캡처는 끊기지 않았다).
         applyAudioOutputPolicy()
         actualConfig = currentDesiredConfig()   // 교체 후 구성 스냅샷 갱신
@@ -460,15 +485,23 @@ final class AppState {
     /// "번역 시작" 시 호출. 키는 호출자가 검증해 전달한다(로그/HUD에 키 노출 금지).
     /// (spec 004 P0: 구체 백엔드 생성/설정은 TranslationProviderFactory + provider로 캡슐화. VAD/입력전사
     ///  정책 주석은 GeminiTranslationProvider로 이관했다.)
-    private func startGemini(apiKey: String) {
+    /// - Returns: provider 생성/배선 성공 여부. 미지원 엔진(팩토리 nil)이면 false(호출자가 정지 수렴).
+    @discardableResult
+    private func startGemini(apiKey: String) -> Bool {
         // 이전 세션 잔재 정리(동기 부분만): onChunk/eventTask 해제 + 핸들 비움.
         // 실제 provider.stop()까지의 대기는 호출처(performStart/performProviderSwap)에서
         // 이미 await로 보장하므로 여기서는 동기 정리만 한다(멱등).
         clearGeminiHandles()
         subtitles.reset()
+
+        // 미지원 엔진(spec 005: onDevice* — 팩토리 nil)이면 캡처/연결을 시작하지 않고 false 반환.
+        guard let provider = providerFactory.make(settings: settings, apiKey: apiKey) else {
+            log.error("startGemini 중단: 선택 모델 엔진 미지원(준비 중) → false 반환")
+            geminiStatus = "이 모델은 아직 준비 중입니다"
+            return false
+        }
         cost.resetSession()   // 세션 비용은 번역 시작마다 0에서 시작(누적은 유지, 태스크 C).
 
-        let provider = providerFactory.make(settings: settings, apiKey: apiKey)
         self.provider = provider
         translating = true
         geminiStatus = "연결 중…"
@@ -493,6 +526,7 @@ final class AppState {
                 self.handle(event)
             }
         }
+        return true
     }
 
     /// 번역 파이프라인의 **동기 핸들만** 해제한다(onChunk/eventTask/provider/상태 라벨).

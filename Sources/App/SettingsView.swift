@@ -14,10 +14,11 @@ struct SettingsView: View {
 
     /// 설정 카테고리(사이드바 항목 = detail 콘텐츠). 라벨/아이콘을 함께 정의한다.
     private enum SettingsCategory: String, CaseIterable, Identifiable {
-        case input, subtitle, audio, monitor, cost, permission, apiKey, general
+        case model, input, subtitle, audio, monitor, cost, permission, apiKey, general
         var id: String { rawValue }
         var label: String {
             switch self {
+            case .model: "모델"
             case .input: "입력"
             case .subtitle: "자막"
             case .audio: "오디오"
@@ -30,6 +31,7 @@ struct SettingsView: View {
         }
         var systemImage: String {
             switch self {
+            case .model: "cpu"
             case .input: "mic"
             case .subtitle: "captions.bubble"
             case .audio: "speaker.wave.2"
@@ -96,6 +98,7 @@ struct SettingsView: View {
     @ViewBuilder
     private func detailView(for category: SettingsCategory) -> some View {
         switch category {
+        case .model: modelTab
         case .input: inputTab
         case .subtitle: subtitleTab
         case .audio: audioTab
@@ -112,9 +115,81 @@ struct SettingsView: View {
     private var inputTab: some View {
         Form {
             inputSection
-            vadSection
         }
         .formStyle(.grouped)
+    }
+
+    // MARK: - 모델 (spec 005)
+
+    private var modelTab: some View {
+        Form {
+            modelSelectionSection
+            modelInfoSection
+            vadSection
+            if appState.selectedModel.engineSlots.translation {
+                translationEngineSection
+            }
+            if appState.selectedModel.engineSlots.llm {
+                llmEngineSection
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// 모델 선택 Section. available==false는 비활성 + "(준비 중)". 선택 시 핫스왑(번역 중)/다음 시작 반영.
+    private var modelSelectionSection: some View {
+        Section("모델 선택") {
+            Picker("번역 모델", selection: Binding(
+                get: { appState.settings.selectedModelID },
+                set: {
+                    appState.settings.selectedModelID = $0
+                    appState.reloadTranslationSession()
+                }
+            )) {
+                ForEach(ModelCatalog.shared.models) { model in
+                    Text(model.displayName + (model.available ? "" : " (준비 중)"))
+                        .tag(model.id)
+                }
+            }
+            .pickerStyle(.menu)
+            Text("번역 중 모델을 바꾸면 즉시 재연결되어 적용됩니다. 준비 중 모델은 선택해도 동작하지 않습니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// 모델 정보 Section. 선택 모델 summary + 능력 배지(텍스트).
+    private var modelInfoSection: some View {
+        let model = appState.selectedModel
+        let caps = model.capabilities
+        return Section("모델 정보") {
+            Text(model.summary)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            LabeledContent("원문 자막", value: caps.sourceText ? "지원" : "미지원")
+            LabeledContent("번역 자막", value: caps.translatedText ? "지원" : "미지원")
+            LabeledContent("번역 오디오", value: caps.translatedAudio ? "지원" : "미지원")
+            LabeledContent("실시간 스트리밍", value: caps.streaming ? "지원" : "미지원")
+            LabeledContent("API 키", value: model.requiresAPIKey ? "필요" : "불필요")
+        }
+    }
+
+    /// 번역 엔진 슬롯(composed 전용, 현재 숨김). 향후 별도 번역 엔진 선택/설정.
+    private var translationEngineSection: some View {
+        Section("번역 엔진") {
+            Text("번역 엔진 설정(준비 중)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// LLM 엔진 슬롯(composed 전용, 현재 숨김). 향후 LLM 선택/프롬프트/키.
+    private var llmEngineSection: some View {
+        Section("LLM 엔진") {
+            Text("LLM 엔진 설정(준비 중)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var subtitleTab: some View {
@@ -165,8 +240,18 @@ struct SettingsView: View {
     }
 
     private var audioTab: some View {
-        Form {
+        // 번역 오디오 미지원 모델이면 재생/덕킹/출력장치 전체를 비활성 + 안내(spec 005 §5.3).
+        let audioCapable = appState.selectedModel.capabilities.translatedAudio
+        return Form {
+            if !audioCapable {
+                Section {
+                    Text("이 모델은 번역 오디오를 제공하지 않습니다.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
             audioSection
+                .disabled(!audioCapable)
         }
         .formStyle(.grouped)
     }
@@ -239,12 +324,15 @@ struct SettingsView: View {
 
     private var vadSection: some View {
         let audio = appState.audio
+        let vad = appState.selectedModel.vad
+        // 한쪽만 지원하면 그 값으로 고정 + 비활성. 둘 다 지원이면 현행 segmented.
+        let bothSupported = vad.server && vad.clientGate
         return Section("음성 감지(VAD)") {
             // VAD 방식 선택: 클라이언트(Silero) ↔ 서버(Gemini 자동).
             // - "client": audio.vadEnabled = true  → 발화 구간만 전송(서버 VAD off + activity 신호).
             // - "server": audio.vadEnabled = false → 연속 전송(서버 자동 VAD가 발화 감지).
             // 번역 중 방식을 바꾸면 setup(realtimeInputConfig)이 달라지므로 재연결해 갱신한다
-            // (안 그러면 double-VAD 재발 또는 누락).
+            // (안 그러면 double-VAD 재발 또는 누락). 모델이 지원하지 않는 옵션은 비활성(spec 005 §5.3).
             Picker("VAD 방식", selection: Binding(
                 get: { audio.vadEnabled ? "client" : "server" },
                 set: { newValue in
@@ -252,14 +340,21 @@ struct SettingsView: View {
                     appState.reloadTranslationSession()
                 }
             )) {
-                Text("클라이언트(Silero)").tag("client")
-                Text("서버(Gemini 자동)").tag("server")
+                Text("클라이언트(Silero)").tag("client").disabled(!vad.clientGate)
+                Text("서버(Gemini 자동)").tag("server").disabled(!vad.server)
             }
             .pickerStyle(.segmented)
+            .disabled(!bothSupported)   // 한쪽만 지원이면 선택 고정.
 
             Text("클라이언트: 음악/무음을 걸러 비용 절감, 소음에 강함. 서버: 연속 전송으로 Gemini가 발화를 감지(무음도 과금). 초기 반복이 심하면 서버 방식을 시도해 보세요.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if !bothSupported {
+                Text("이 모델은 한 가지 VAD 방식만 지원합니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             // 모델 상태: 클라이언트 방식일 때만 Silero 로드 상태가 의미 있다.
             // 서버 방식은 클라이언트 VAD를 사용하지 않으므로 별도 표기한다.
@@ -330,10 +425,17 @@ struct SettingsView: View {
                 set: { settings.subtitleAutoShowOnCapture = $0 }
             ))
 
+            // 원문 표시는 모델이 원문 전사를 생산할 때만 활성(spec 005 §5.3).
             Toggle("원문 동시 표시", isOn: Binding(
                 get: { settings.showSourceText },
                 set: { settings.showSourceText = $0 }
             ))
+            .disabled(!appState.selectedModel.capabilities.sourceText)
+            if !appState.selectedModel.capabilities.sourceText {
+                Text("이 모델은 원문 전사를 제공하지 않습니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             // 테스트 자막: 토글 ON 동안 샘플 자막을 오버레이에 고정 표시한다(페이드 없음).
             // 이 상태에서 위 세부위치/세로위치/스타일을 바꾸면 실시간으로 따라 이동/갱신된다.
