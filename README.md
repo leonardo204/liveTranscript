@@ -27,9 +27,10 @@ Google **Gemini 3.5 Live Translate** 기반의 macOS 실시간 자막 번역 앱
 
 ## 요구사항
 
-- **macOS 14.0+** (마이크/BlackHole 입력)
-- **macOS 14.4+** — 시스템 오디오 직접 캡처(Core Audio Process Tap) 사용 시
-- **Gemini API 키** — [Google AI Studio](https://aistudio.google.com)에서 발급
+- **macOS 15.0+** (최소 사양 — 이전 버전 미지원)
+- 시스템 오디오 직접 캡처(Core Audio Process Tap)는 macOS 14.4+ API 사용(15에서 정상 동작)
+- **Gemini API 키** — [Google AI Studio](https://aistudio.google.com)에서 발급 (클라우드 번역용)
+- **오프라인 번역(Apple Speech, 키 불필요)** 모델은 **macOS 26+** 필요(그 미만에선 비활성)
 - 빌드: [XcodeGen](https://github.com/yonaskolb/XcodeGen), Xcode (Swift 6.0)
 
 ---

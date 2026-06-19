@@ -51,6 +51,9 @@
 - [002 Gemini Live & 오디오](specs/002-gemini-live-translate-and-audio.md) — Live Translate 사용법 + 피드백 루프 재발 방지
 - [003 온디바이스 ASR 조사](specs/003-ondevice-asr-research.md) — 키 없는 사용자용 STT/번역 엔진 후보(Apple Speech/WhisperKit/FluidAudio)
 - [004 번역 파이프라인 추상화](specs/004-translation-pipeline-architecture.md) — 공통 API 레이어 + Stage 파이프라인(엔진 플러그인 구조)
+- [005 모델 카탈로그 + 설정](specs/005-model-catalog-and-settings.md) — JSON 모델 레지스트리 + 모델 탭 + 능력 기반 UI
+- [006 로깅 정책](specs/006-logging-policy.md) — 계층 추적 + 체크포인트 + LogTag prefix
+- [007 Apple Speech 오프라인 번역](specs/007-apple-speech-offline-translate.md) — 온디바이스 STT+번역(키 불필요, macOS 26+) + P1-A Stage 구현
 - [릴리스 가이드](ref-docs/claude/release-guide.md) — Sparkle 배포/공증/appcast 절차
 
 ### 핵심 규칙

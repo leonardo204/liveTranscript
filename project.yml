@@ -3,7 +3,7 @@ name: liveTranslate
 options:
   bundleIdPrefix: com.altimedia
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "15.0"
   createIntermediateGroups: true
 
 # SPM 의존성
@@ -32,7 +32,7 @@ targets:
   liveTranslate:
     type: application
     platform: macOS
-    deploymentTarget: "14.0"
+    deploymentTarget: "15.0"
     sources:
       - path: Sources
     dependencies:
@@ -51,6 +51,9 @@ targets:
         # 시스템 오디오 직접 캡처 권한 문구 (M1c, Core Audio Process Tap, macOS 14.4+ TCC)
         # 첫 tap 생성 시 OS가 이 문구로 캡처 권한을 묻는다(화면 녹화 권한 불필요).
         NSAudioCaptureUsageDescription: "실시간 번역을 위해 시스템에서 재생되는 오디오를 캡처합니다"
+        # 음성 인식 권한 문구 (spec 007, Apple Speech 온디바이스 전사 — SFSpeechRecognizer.requestAuthorization).
+        # 온디바이스 처리지만 Speech 프레임워크 인증 흐름상 이 키가 필요하다.
+        NSSpeechRecognitionUsageDescription: "키 없이 오프라인 번역을 제공하기 위해 음성을 텍스트로 변환합니다(온디바이스 처리)"
         # 버전 표시는 빌드 설정(MARKETING_VERSION/CURRENT_PROJECT_VERSION)을 단일 진실로 사용한다.
         # ($()는 빌드 시 치환됨 — Sparkle/설정 UI의 "현재 버전"이 project.yml 버전과 항상 일치.)
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
