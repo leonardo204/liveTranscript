@@ -74,3 +74,5 @@ targets:
         PRODUCT_NAME: liveTranslate
         ENABLE_HARDENED_RUNTIME: "YES"
         SWIFT_STRICT_CONCURRENCY: complete
+        # 앱 아이콘 — Sources/Assets.xcassets/AppIcon.appiconset(에셋 카탈로그는 sources 글롭에 포함됨).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

@@ -9,9 +9,13 @@ struct liveTranslateApp: App {
     @State private var appState = AppState()
 
     var body: some Scene {
-        MenuBarExtra("liveTranslate", systemImage: "captions.bubble") {
+        MenuBarExtra {
             MenuBarContent()
                 .environment(appState)
+        } label: {
+            // 커스텀 메뉴바 글리프(Assets: MenuBarGlyph, 템플릿 렌더링 → 라이트/다크 자동 틴트).
+            Image("MenuBarGlyph")
+                .accessibilityLabel("liveTranslate")
         }
         .menuBarExtraStyle(.menu)
         // macOS 표준 "설정…"(⌘,) — 앱 메뉴의 기본 appSettings 항목을 커스텀 설정 창에 연결한다.
