@@ -84,16 +84,18 @@ final class SubtitleEngine {
     /// 문장 간 공백마다 사라지지 않도록 holdSeconds(2s)보다 충분히 길게 둔다.
     private static let rollupIdleClearSeconds: Double = 8.0
 
-    /// roll-up 깊이(= 사용자 자막 줄수). 최소 1.
-    private var rollupDepth: Int { max(1, settings?.subtitleMaxLines ?? 2) }
+    /// roll-up 문장 히스토리 버퍼 상한(문장 수). 화면 줄수(maxLines) 제한은 **뷰(lineLimit+.head)**가
+    /// 처리하므로, 여기선 마지막 N개 화면 줄을 채우기에 충분한 문장만 보관한다(메모리 상한).
+    private static let maxRollupHistory: Int = 12
 
     /// HUD에 보여줄 "현재 번역문".
-    /// - 세그먼트 모드: 확정 문장 FIFO(최근 `rollupDepth`개)를 줄바꿈으로 이어 표시(roll-up).
+    /// - 세그먼트 모드: 확정 문장들을 줄바꿈으로 이어 표시. **시각적 줄수 제한(maxLines)은 뷰가**
+    ///   `lineLimit + .head`로 적용 → 넘치는 오래된 줄은 위에서 밀려나는 roll-up이 된다.
     /// - delta(Gemini) 모드: 누적 중이면 누적분, 아니면 마지막 확정분.
     var displayTranslation: String {
         if segmentMode {
             let lines = currentTranslation.isEmpty ? rollupLines : rollupLines + [currentTranslation]
-            return lines.suffix(rollupDepth).joined(separator: "\n")
+            return lines.joined(separator: "\n")
         }
         return currentTranslation.isEmpty ? confirmedTranslation : currentTranslation
     }
@@ -247,8 +249,8 @@ final class SubtitleEngine {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !collapsed.isEmpty, rollupLines.last != collapsed {
                     rollupLines.append(collapsed)
-                    if rollupLines.count > rollupDepth {
-                        rollupLines.removeFirst(rollupLines.count - rollupDepth)
+                    if rollupLines.count > Self.maxRollupHistory {
+                        rollupLines.removeFirst(rollupLines.count - Self.maxRollupHistory)
                     }
                 }
                 currentTranslation = ""   // 진행 중 번역 줄 없음(final-only)

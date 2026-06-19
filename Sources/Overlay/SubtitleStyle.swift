@@ -146,17 +146,16 @@ struct StyledSubtitleText: View {
     let text: String
     let size: CGFloat
     let style: SubtitleStyle
-    /// 줄수 제한 오버라이드. nil이면 `style.maxLines`(delta/Gemini 기본). roll-up(세그먼트) 모드는
-    /// 여러 확정 문장이 각자 줄바꿈될 수 있어 더 큰 값을 넘긴다(.head 절단으로 오래된 줄부터 밀려남).
-    var lineLimitOverride: Int? = nil
 
     var body: some View {
         // modifier 체이닝의 타입 추론 부담을 줄이기 위해 단계적 변수 + 조건 분기로 처리.
+        // lineLimit(maxLines) + .head: 넘치는 텍스트는 **앞(오래된) 줄부터** 잘려 마지막 maxLines
+        // 화면 줄만 보인다 → roll-up 자막이 "최대 줄수"를 정확히 지킨다.
         let base = Text(text)
             .font(style.font(size: size))
             .foregroundStyle(style.textColor)
             .multilineTextAlignment(style.align.textAlignment)
-            .lineLimit(lineLimitOverride ?? style.maxLines)
+            .lineLimit(style.maxLines)
             .truncationMode(.head)
 
         return base
