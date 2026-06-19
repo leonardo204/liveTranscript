@@ -49,6 +49,8 @@
 
 - [001 설계](specs/001-liveTranslate-design.md) — 전체 설계/마일스톤/비용 계획
 - [002 Gemini Live & 오디오](specs/002-gemini-live-translate-and-audio.md) — Live Translate 사용법 + 피드백 루프 재발 방지
+- [003 온디바이스 ASR 조사](specs/003-ondevice-asr-research.md) — 키 없는 사용자용 STT/번역 엔진 후보(Apple Speech/WhisperKit/FluidAudio)
+- [004 번역 파이프라인 추상화](specs/004-translation-pipeline-architecture.md) — 공통 API 레이어 + Stage 파이프라인(엔진 플러그인 구조)
 - [릴리스 가이드](ref-docs/claude/release-guide.md) — Sparkle 배포/공증/appcast 절차
 
 ### 핵심 규칙
