@@ -86,9 +86,20 @@ actor AppleSpeechSTTStage: SpeechToTextStage {
         }
         Self.log.info("\(LogTag.speech, privacy: .public) 권한 authorized")
 
-        let locale = Locale(identifier: sourceLocaleIdentifier)
+        // 2) 소스 언어 코드를 실제 '지원 로케일'로 해석한다(예: "en" → "en-US").
+        //    SpeechTranscriber/AssetInventory.reserve는 정확한 지원 식별자를 요구하므로,
+        //    언어코드만("en") 넘기면 "Unable to reserve unsupported locale"로 거부된다.
+        let supported = await SpeechTranscriber.supportedLocales
+        guard let locale = Self.resolveSupportedLocale(code: sourceLocaleIdentifier, supported: supported) else {
+            let ids = supported.map { $0.identifier(.bcp47) }.sorted().joined(separator: ", ")
+            Self.log.error("\(LogTag.speech, privacy: .public) 지원 로케일 매칭 실패 — wanted=\(self.sourceLocaleIdentifier, privacy: .public) supported=[\(ids, privacy: .public)]")
+            continuation.yield(.failure("이 언어는 온디바이스 전사를 지원하지 않습니다(\(self.sourceLocaleIdentifier))."))
+            continuation.finish()
+            return
+        }
+        Self.log.info("\(LogTag.speech, privacy: .public) locale 해석 — wanted=\(self.sourceLocaleIdentifier, privacy: .public) resolved=\(locale.identifier(.bcp47), privacy: .public)")
 
-        // 2) 전사 모듈 구성.
+        // 3) 전사 모듈 구성(해석된 정확 로케일 사용).
         let transcriber = SpeechTranscriber(
             locale: locale,
             transcriptionOptions: [],
@@ -214,6 +225,36 @@ actor AppleSpeechSTTStage: SpeechToTextStage {
                 cont.resume(returning: status == .authorized)
             }
         }
+    }
+
+    /// 소스 언어 코드("en", "ko" 등 또는 "en-US")를 SpeechTranscriber가 실제 지원하는
+    /// 정확 로케일로 해석한다. 정확 식별자가 아니면 reserve/install이 거부되므로 필수.
+    /// 우선순위: ① 정확(bcp47) 일치 → ② 같은 언어코드 + 현재 지역 → ③ en은 en-US 선호 → ④ 같은 언어코드 첫 번째.
+    private static func resolveSupportedLocale(code: String, supported: [Locale]) -> Locale? {
+        let wanted = code.lowercased()
+        let wantedLang = wanted.split(separator: "-").first.map(String.init) ?? wanted
+
+        // ① 정확 일치(bcp47, 대소문자 무시)
+        if let exact = supported.first(where: { $0.identifier(.bcp47).lowercased() == wanted }) {
+            return exact
+        }
+        // 같은 언어코드 후보들
+        let sameLang = supported.filter {
+            ($0.language.languageCode?.identifier.lowercased() ?? "") == wantedLang
+        }
+        guard !sameLang.isEmpty else { return nil }
+        // ② 현재 지역 우선
+        if let region = Locale.current.region?.identifier,
+           let regional = sameLang.first(where: { $0.region?.identifier == region }) {
+            return regional
+        }
+        // ③ 영어는 en-US 선호
+        if wantedLang == "en",
+           let us = sameLang.first(where: { $0.identifier(.bcp47).lowercased() == "en-us" }) {
+            return us
+        }
+        // ④ 같은 언어코드 첫 번째(결정적 순서를 위해 정렬)
+        return sameLang.sorted { $0.identifier(.bcp47) < $1.identifier(.bcp47) }.first
     }
 
     /// 로케일 모델 설치 보장(spec 007 §7.3). 설치돼 있으면 no-op, 미설치면 다운로드 요청.
