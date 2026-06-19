@@ -61,8 +61,11 @@ final class AppState {
     /// 번역 세션이 연결 가능 상태인지(키 존재 + 연결 시도 중/완료).
     private(set) var translating: Bool = false
 
-    /// 현재 살아있는 Gemini 클라이언트(actor). 정지 시 해제.
-    @ObservationIgnored private var gemini: GeminiLiveClient?
+    /// 현재 살아있는 번역 제공자(추상). 정지 시 해제. (spec 004 P0: GeminiLiveClient를 직접 보유하지 않고
+    /// TranslationProvider 추상 뒤에 둔다 — 엔진 교체/스테이지 합성에 무손상 대응.)
+    @ObservationIgnored private var provider: (any TranslationProvider)?
+    /// 설정+키로부터 provider를 만드는 팩토리(P0: geminiLive 고정).
+    @ObservationIgnored private let providerFactory = TranslationProviderFactory()
     /// 수신 이벤트 소비 Task.
     @ObservationIgnored private var eventTask: Task<Void, Never>?
 
@@ -414,45 +417,33 @@ final class AppState {
 
     // MARK: - Gemini 수명주기 (M2a)
 
-    /// Gemini 연결을 시작하고 오디오 파이프라인(onChunk → sendAudio)을 배선한다.
+    /// 번역 제공자 연결을 시작하고 오디오 파이프라인(onChunk → send)을 배선한다.
     /// "번역 시작" 시 호출. 키는 호출자가 검증해 전달한다(로그/HUD에 키 노출 금지).
+    /// (spec 004 P0: 구체 백엔드 생성/설정은 TranslationProviderFactory + provider로 캡슐화. VAD/입력전사
+    ///  정책 주석은 GeminiTranslationProvider로 이관했다.)
     private func startGemini(apiKey: String) {
         // 이전 세션 잔재 정리(동기 부분만): onChunk/eventTask 해제 + 핸들 비움.
-        // 실제 client.stop()까지의 대기는 호출처(performStart/performGeminiReload)에서
+        // 실제 provider.stop()까지의 대기는 호출처(performStart/performGeminiReload)에서
         // 이미 await로 보장하므로 여기서는 동기 정리만 한다(멱등).
         clearGeminiHandles()
         subtitles.reset()
         cost.resetSession()   // 세션 비용은 번역 시작마다 0에서 시작(누적은 유지, 태스크 C).
 
-        let client = GeminiLiveClient(
-            apiKey: apiKey,
-            targetLanguageCode: settings.targetLanguageCode,
-            // 항상 false로 고정: 서버 자동 VAD를 사용한다(realtimeInputConfig 생략 + activity 신호 미전송).
-            // 검증 결과 translate-preview 모델은 manual activity 경계를 turn 종료로 인정하지 않아
-            // turnComplete를 보내지 않았고, idle 타이머와 강제 분절이 sparse VAD 프레임과 충돌해
-            // activityStart/End가 폭주(storm)했다. 따라서 activity 기반 경계 제어를 비활성화하고
-            // 서버 VAD에 일임한다. 클라이언트 Silero(audio.vadEnabled)는 "어떤 오디오를 보낼지"만
-            // 게이트(비용/소음 절감)하며 서버 VAD와 독립적으로 동작한다.
-            clientVADEnabled: false,
-            // 원문 동시 표시가 켜진 경우에만 입력 전사를 요청한다(off면 공식 translate 예제와 동일하게
-            // inputAudioTranscription 키를 생략 → 원문 자막 없음, 의도된 동작).
-            requestInputTranscription: settings.showSourceText
-        )
-        self.gemini = client
+        let provider = providerFactory.make(settings: settings, apiKey: apiKey)
+        self.provider = provider
         translating = true
         geminiStatus = "연결 중…"
-        // 번역 출력 오디오 재생 플래그를 전달(off면 client가 오디오 디코드도 생략 — 비용 0).
-        Task { await client.setPlaybackEnabled(settings.translatedAudioPlaybackEnabled) }
+        // 초기 재생 플래그 반영(직렬 동기화 경로 재사용 — provider nil 가드 포함).
+        // off면 provider/엔진이 오디오 디코드도 생략 — 비용 0.
+        syncPlaybackEnabled(settings.translatedAudioPlaybackEnabled)
 
-        // 오디오 스레드의 발화 청크를 actor로 hop해 송신한다.
-        // onChunk는 @Sendable — client는 actor라 안전하게 캡처 가능.
-        audio.onChunk = { chunk in
-            Task { await client.sendAudio(chunk) }
-        }
+        // 오디오 스레드의 발화 청크를 provider로 주입한다(provider.send는 nonisolated — Task 래핑 불필요).
+        let p = provider
+        audio.onChunk = { chunk in p.send(chunk) }
 
         // 이벤트 스트림 소비(연결/상태/번역 텍스트) — MainActor에서 HUD/상태 갱신.
         eventTask = Task { [weak self] in
-            let stream = await client.connect()
+            let stream = await p.start()
             for await event in stream {
                 guard let self else { break }
                 self.handle(event)
@@ -460,47 +451,52 @@ final class AppState {
         }
     }
 
-    /// Gemini 파이프라인의 **동기 핸들만** 해제한다(onChunk/eventTask/gemini/상태 라벨).
-    /// 살아있던 client는 지역 변수로 빼 반환하므로, 호출자가 await로 정지를 마칠 수 있다.
-    private func clearGeminiHandles() -> GeminiLiveClient? {
+    /// 번역 파이프라인의 **동기 핸들만** 해제한다(onChunk/eventTask/provider/상태 라벨).
+    /// 살아있던 provider는 지역 변수로 빼 반환하므로, 호출자가 await로 정지를 마칠 수 있다.
+    /// (startGemini의 동기 정리처럼 반환을 무시해도 되는 호출이 있어 @discardableResult.)
+    @discardableResult
+    private func clearGeminiHandles() -> (any TranslationProvider)? {
         audio.onChunk = nil
         eventTask?.cancel()
         eventTask = nil
-        // 현재 client를 지역 변수로 분리한 뒤 즉시 self.gemini를 비운다.
-        // client.stop()은 actor 내부에서 stopped=true + generation++ + teardownSocket()을
-        // 수행하므로, 이 stop이 끝나면 해당 client는 어떤 경로로도 재연결하지 않는다.
-        // (각 client는 독립적이라 새 세션 생성과 이전 세션 정지가 서로를 오염시키지 않는다.)
-        let client = gemini
-        gemini = nil
+        // 현재 provider를 지역 변수로 분리한 뒤 즉시 self.provider를 비운다.
+        // provider.stop()은 내부 client.stop()(stopped=true + generation++ + teardownSocket())을
+        // 수행하므로, 이 stop이 끝나면 해당 provider는 어떤 경로로도 재연결하지 않는다.
+        // (각 provider는 독립적이라 새 세션 생성과 이전 세션 정지가 서로를 오염시키지 않는다.)
+        let p = provider
+        provider = nil
         translating = false
         geminiStatus = "연결 안 됨"
-        return client
+        return p
     }
 
-    /// Gemini 연결을 종료하고 파이프라인을 해제한다("번역 정지").
-    /// fire-and-forget이 아니라 **client.stop()이 끝날 때까지 await**한다(빠른 토글 시
+    /// 번역 연결을 종료하고 파이프라인을 해제한다("번역 정지").
+    /// fire-and-forget이 아니라 **provider.stop()이 끝날 때까지 await**한다(빠른 토글 시
     /// 이전 정지가 끝나기 전에 새 세션이 시작돼 겹치는 것을 막는다). 멱등.
     private func stopGemini() async {
-        if let client = clearGeminiHandles() {
-            await client.stop()
+        if let p = clearGeminiHandles() {
+            await p.stop()
         }
     }
 
-    /// Gemini 이벤트를 상태/자막으로 반영한다(MainActor).
-    private func handle(_ event: GeminiLiveClient.Event) {
+    /// 파이프라인 이벤트를 상태/자막으로 반영한다(MainActor).
+    /// (spec 004 P0: GeminiLiveClient.Event → PipelineEvent로 사상이 한 단계 추상화됐으나, 각 분기의
+    ///  동작/로그 의미는 기존과 동일하게 보존한다.)
+    private func handle(_ event: PipelineEvent) {
         switch event {
         case .state(let state):
             switch state {
-            case .disconnected: geminiStatus = "연결 안 됨"; log.info("event.state=disconnected")
-            case .connecting: geminiStatus = "연결 중…"; log.info("event.state=connecting")
+            case .idle: geminiStatus = "연결 안 됨"; log.info("event.state=disconnected")
+            case .preparing: geminiStatus = "연결 중…"; log.info("event.state=connecting")
             case .ready: geminiStatus = "번역 중"; log.info("event.state=ready")
+            case .reconnecting: geminiStatus = "연결 중…"; log.info("event.state=connecting")
             case .error(let message):
                 geminiStatus = message  // 키 미포함(클라이언트가 보장)
                 log.error("event.state=error: \(message, privacy: .public)")
             }
-        case .translation(let delta):
+        case .translatedText(let delta):
             subtitles.ingestTranslationDelta(delta)
-        case .source(let delta):
+        case .sourceText(let delta):
             subtitles.ingestSourceDelta(delta)
         case .turnComplete:
             subtitles.ingestTurnComplete()
@@ -511,11 +507,16 @@ final class AppState {
             log.info("event.generationComplete → 자막 generation 경계 + 오디오 flush")
             subtitles.ingestGenerationComplete()
             translatedAudioPlayer.flush()
-        case .sentAudio(let sampleCount):
-            cost.addSentAudio(sampleCount: sampleCount)   // 입력 비용 누적(태스크 C).
-        case .outputTokens(let tokens):
-            log.debug("event.outputTokens=\(tokens, privacy: .public) (비용 누적)")
-            cost.addOutputTokens(tokens)                  // 출력 비용 누적(태스크 C).
+        case .usage(let metric):
+            switch metric {
+            case .sentAudio(let sampleCount):
+                cost.addSentAudio(sampleCount: sampleCount)   // 입력 비용 누적(태스크 C).
+            case .outputAudioTokens(let tokens):
+                log.debug("event.outputTokens=\(tokens, privacy: .public) (비용 누적)")
+                cost.addOutputTokens(tokens)                  // 출력 비용 누적(태스크 C).
+            case .localCompute:
+                break   // P0 미사용(온디바이스 스테이지 비용 — P1+).
+            }
         case .outputAudio(let data):
             // A2: enqueue 도달 여부 추적(첫 1회 + N회마다). 바이트수만 로그(데이터 내용 미포함).
             outputAudioEnqueueCount += 1
@@ -571,7 +572,6 @@ final class AppState {
     func applyAudioOutputPolicy() {
         // A2: 호출 진입 + 분기 추적(오디오 정책 thrash 원인 확정용).
         log.info("applyAudioOutputPolicy: playback=\(self.settings.translatedAudioPlaybackEnabled) isRunning=\(self.isRunning)")
-        let live = gemini   // 살아있는 client(actor) 참조
 
         if settings.translatedAudioPlaybackEnabled, isRunning {
             log.info("applyAudioOutputPolicy: 분기=start (재생 시작 + 덕킹 적용)")
@@ -579,7 +579,7 @@ final class AppState {
             // 설정된 출력 장치로 라우팅(시작 직전 반영 — nil이면 시스템 기본).
             translatedAudioPlayer.setOutputDevice(uid: settings.translatedAudioOutputDeviceUID)
             translatedAudioPlayer.start()
-            if let live { syncPlaybackEnabled(true, to: live) }
+            syncPlaybackEnabled(true)   // provider nil이면 내부 가드로 no-op.
             // 덕킹: on이면 원문(과 번역) 출력을 함께 낮춘다, off면 복원.
             if settings.originalAudioDuckingEnabled {
                 systemAudioDucker.duck(to: Float(settings.originalAudioDuckVolume))
@@ -588,19 +588,21 @@ final class AppState {
             }
         } else {
             log.info("applyAudioOutputPolicy: 분기=stop (재생 중지 + 볼륨 복원)")
-            // 재생 off거나 정지 상태: 재생 중지 + 볼륨 복원 + client 디코드 중단.
+            // 재생 off거나 정지 상태: 재생 중지 + 볼륨 복원 + provider 디코드 중단.
             translatedAudioPlayer.stop()
             systemAudioDucker.restore()
-            if let live { syncPlaybackEnabled(false, to: live) }
+            syncPlaybackEnabled(false)   // provider nil이면 내부 가드로 no-op.
         }
     }
 
-    /// setPlaybackEnabled 호출을 직렬 체이닝한다. 새 Task가 직전 Task의 완료를
-    /// await한 뒤 actor에 진입하므로 호출 순서(FIFO)가 보장된다 → 마지막 호출이 최종값.
-    /// (fire-and-forget Task 난사 시 actor 진입 순서 미보장으로 최종값이 뒤집히던 문제 수정.)
-    private func syncPlaybackEnabled(_ on: Bool, to live: GeminiLiveClient) {
+    /// setTranslatedAudioPlayback 호출을 직렬 체이닝한다. 새 Task가 직전 Task의 완료를
+    /// await한 뒤 provider에 진입하므로 호출 순서(FIFO)가 보장된다 → 마지막 호출이 최종값.
+    /// (fire-and-forget Task 난사 시 진입 순서 미보장으로 최종값이 뒤집히던 문제 수정.)
+    /// provider가 없으면 no-op(시작 전/정지 후 호출 안전).
+    private func syncPlaybackEnabled(_ on: Bool) {
+        guard let prov = provider else { return }
         let prev = playbackSyncTask
-        playbackSyncTask = Task { await prev?.value; await live.setPlaybackEnabled(on) }
+        playbackSyncTask = Task { await prev?.value; await prov.setTranslatedAudioPlayback(on) }
     }
 
     // MARK: - 미리보기/리셋 (설정 UI)
