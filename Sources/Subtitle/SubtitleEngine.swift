@@ -9,13 +9,13 @@ import os
 /// **이어붙여(append) 누적**해야 완전한 문장이 된다. 동작 모델:
 ///
 /// - **delta 수신** → 현재 줄(`currentTranslation`/`currentSource`)에 **append**하여
-///   문장이 자라는 것을 즉시 화면에 보인다. 진행 중 숨김 타이머는 취소(계속 성장).
-/// - **turnComplete 수신** → 현재 줄을 **확정**으로 고정하고 버퍼를 비운다. 확정 줄을
-///   **표시 유지 시간**(`holdSeconds`, 기본 2.0s) 동안 유지한 뒤 **자동 페이드아웃**.
-///   이후 다음 문장은 빈 버퍼에서 처음부터 새로 자란다.
+///   문장이 자라는 것을 즉시 화면에 보인다(맨 아래 진행 줄).
+/// - **확정(charBreak/turnComplete/무음)** → 현재 줄을 정리해 **roll-up FIFO(`rollupLines`)에
+///   push**하고 버퍼를 비운다. Apple 세그먼트 경로와 **동일한 roll-up 표시**로 통일했다(과거의
+///   confirmed+holdSeconds 페이드 모델 폐기). 전체 정리(무음)는 `armSilenceClear`가 담당한다.
 /// - **무음 fallback** → turnComplete가 누락된 연속 음성에서 자막이 영원히 누적되지
 ///   않도록, 마지막 delta 이후 `silenceTimeout`(기본 2.0s) 동안 새 조각이 없으면
-///   자동으로 확정 처리한다(turnComplete와 동일 경로).
+///   자동으로 확정(roll-up push) 처리한다.
 ///
 /// 페이드 인/아웃 애니메이션(~0.25s)은 표시 뷰(`SubtitleOverlayView`)가 `isVisible`
 /// 전이를 SwiftUI `.animation`으로 처리한다 — 엔진은 "무엇을, 언제까지 보일지"만 결정한다.
@@ -92,9 +92,9 @@ final class SubtitleEngine {
     private static let maxRollupHistory: Int = 12
 
     /// HUD에 보여줄 "현재 번역문".
-    /// - 세그먼트 모드: 확정 문장들을 줄바꿈으로 이어 표시. **시각적 줄수 제한(maxLines)은 뷰가**
-    ///   `lineLimit + .head`로 적용 → 넘치는 오래된 줄은 위에서 밀려나는 roll-up이 된다.
-    /// - delta(Gemini) 모드: 누적 중이면 누적분, 아니면 마지막 확정분.
+    /// - roll-up 모드(Apple 세그먼트 + Gemini delta 공통): 확정 줄들(rollupLines)을 줄바꿈으로 잇고
+    ///   진행 중 줄(currentTranslation)을 맨 아래에 붙인다. 시각적 줄수 제한은 **뷰가 클립**한다.
+    /// - 비세그먼트 폴백(테스트 미리보기 등): 누적 중이면 누적분, 아니면 마지막 확정분.
     var displayTranslation: String {
         if segmentMode {
             // 뷰는 마지막 maxLines(시각)줄만 클립해 보여주므로, 그리기에 넘길 문장도 그만큼만 추린다.
@@ -117,10 +117,6 @@ final class SubtitleEngine {
 
     // MARK: - 타이밍 상수 (스펙 §5.4)
 
-    /// 확정 자막 유지 시간(초) — turnComplete 후 이 시간만큼 보인 뒤 페이드아웃.
-    /// 사용자 명세의 핵심: "turnComplete 후 ~2초 유지 후 사라짐".
-    private static let holdSeconds: Double = 2.0
-
     /// 무음 fallback 시간(초) — 마지막 delta 이후 이 시간 동안 새 조각이 없으면 자동 확정.
     /// turnComplete가 누락된 연속 음성에서 자막이 무한 누적되지 않게 한다.
     private static let silenceTimeout: Double = 2.0
@@ -139,9 +135,6 @@ final class SubtitleEngine {
         let configured = settings?.subtitleMaxCharsBeforeBreak ?? 0
         return max(byLines, configured)
     }
-
-    /// 확정 줄을 내리는 단발 타이머(holdSeconds). 새 delta가 오면 취소된다.
-    @ObservationIgnored private var hideTask: Task<Void, Never>?
 
     /// 무음 fallback 타이머(silenceTimeout). delta마다 재설정, turnComplete/확정 시 취소.
     @ObservationIgnored private var silenceTask: Task<Void, Never>?
@@ -166,8 +159,12 @@ final class SubtitleEngine {
         log.debug("\(LogTag.subtitle, privacy: .public) 번역 delta: \"\(delta.prefix(40), privacy: .public)\" len=\(delta.count)")
         applyPendingGenerationResetIfNeeded()
         guard appendIfMeaningful(delta, to: &currentTranslation) else { return }
+        // delta(Gemini) 경로도 Apple과 동일한 roll-up 표시로 통일한다(confirmTurn이 rollupLines에 push).
+        segmentMode = true
         showAndCancelHide()
-        // 길이 기반 break(태스크 B): ~2줄 분량 초과 시 현재까지를 확정하고 다음으로 넘긴다.
+        // delta가 임계 시간 끊기면 전체 정리(Apple STT heartbeat와 동일한 무음 처리). 매 delta 재무장.
+        armSilenceClear()
+        // 길이 기반 break(태스크 B): ~2줄 분량 초과 시 현재까지를 roll-up에 push하고 다음 줄로 넘긴다.
         // turnComplete/무음 fallback과 별개 경로. 줄임표 없이 문장을 자연스럽게 분리한다.
         if currentTranslation.count >= maxCharsBeforeBreak {
             // 진단: charBreak 임계 계산 내역(줄수/byLines/configured/최종)을 함께 로그(1줄만 보이는 원인 확정용).
@@ -175,7 +172,7 @@ final class SubtitleEngine {
             let byLines = AppConfig.charsPerSubtitleLine * max(1, lines)
             let configured = settings?.subtitleMaxCharsBeforeBreak ?? 0
             log.debug("\(LogTag.subtitle, privacy: .public) charBreak 발생: len=\(self.currentTranslation.count, privacy: .public) 임계=\(self.maxCharsBeforeBreak, privacy: .public) (줄수=\(lines, privacy: .public) byLines=\(byLines, privacy: .public) configured=\(configured, privacy: .public))")
-            confirmTurn(reason: .charBreak)   // 확정 줄은 holdSeconds 유지 후 페이드 → 새 버퍼에서 다음 누적 시작.
+            confirmTurn(reason: .charBreak)   // 현재까지를 roll-up에 push → 빈 버퍼에서 다음 줄 누적 시작.
             return
         }
         scheduleSilenceFallback()
@@ -238,7 +235,7 @@ final class SubtitleEngine {
     /// - Parameters:
     ///   - translation: 번역 세그먼트 전체. nil이면 번역 줄을 **유지**(원문만 갱신할 때).
     ///   - source: 원문 세그먼트 전체. nil이면 원문 줄을 유지(번역만 갱신할 때).
-    ///   - isFinal: true면 확정 경계(`confirmTurn` 재사용 — hold/dedup/scheduleHide),
+    ///   - isFinal: true면 확정 줄을 dedup/collapse 후 roll-up FIFO에 직접 push,
     ///     false면 라이브 갱신만(current 교체 + isVisible 유지).
     func ingestSegment(translation: String?, source: String?, isFinal: Bool) {
         // 진단: 어떤 줄을 어떻게 갱신했는지(앞 40자/길이/확정 여부) — roll-up 추적용(텍스트, 키 아님).
@@ -269,8 +266,7 @@ final class SubtitleEngine {
             }
         }
 
-        // roll-up은 문장마다 페이드하지 않는다 — 짧은 hide/silence 타이머를 끄고, 무음 정리 타이머만 건다.
-        hideTask?.cancel(); hideTask = nil
+        // roll-up은 문장마다 페이드하지 않는다 — 짧은 silence(자동확정) 타이머만 끄고, 무음 정리 타이머만 건다.
         silenceTask?.cancel(); silenceTask = nil
         isVisible = true
         armSilenceClear()
@@ -320,9 +316,9 @@ final class SubtitleEngine {
     /// current와 confirmed를 동일하게 채워, 어느 표시 경로(displayTranslation/displaySource)에서도
     /// 빈 버퍼로 인해 자막이 사라지지 않게 한다. generation 리셋 대기 플래그도 false로 둔다.
     func showPreview(translation: String, source: String?) {
-        // 진행 중일 수 있는 모든 타이머를 취소(자동 확정/페이드 예약 차단).
-        hideTask?.cancel(); hideTask = nil
+        // 진행 중일 수 있는 모든 타이머를 취소(자동 확정 예약 차단).
         silenceTask?.cancel(); silenceTask = nil
+        silenceClearTask?.cancel(); silenceClearTask = nil
         let src = source ?? ""
         currentTranslation = translation
         currentSource = src
@@ -342,7 +338,6 @@ final class SubtitleEngine {
     func reset() {
         // A3: 세션 재시작 폭주 여부 확인용(짧은 간격으로 반복되면 재연결 storm 신호).
         log.debug("\(LogTag.subtitle, privacy: .public) 자막 reset")
-        hideTask?.cancel(); hideTask = nil
         silenceTask?.cancel(); silenceTask = nil
         silenceClearTask?.cancel(); silenceClearTask = nil
         currentTranslation = ""
@@ -463,69 +458,41 @@ final class SubtitleEngine {
 
     // MARK: - 내부: 확정/표시
 
-    /// 현재 누적 줄을 확정으로 고정하고 holdSeconds 후 페이드아웃 타이머를 건다.
-    /// turnComplete와 무음 fallback이 공유하는 단일 경로.
+    /// 누적된 현재(delta) 줄을 정리해 **roll-up FIFO에 push**한다(delta 경로 전용 — charBreak/turnComplete/
+    /// 무음 fallback이 공유). 세그먼트 경로(Apple)는 `ingestSegment`에서 직접 push하므로 이 메서드를 안 쓴다.
+    ///
+    /// Gemini delta도 Apple과 동일한 roll-up 표시로 통일: 확정 줄을 페이드시키지 않고 rollupLines에 쌓아
+    /// 여러 줄로 보이게 한다. 전체 정리(무음)는 `ingestTranslationDelta`가 매 delta마다 재무장하는
+    /// `armSilenceClear`가 담당하므로 여기선 타이머를 만지지 않는다.
     private func confirmTurn(reason: ConfirmReason) {
-        // A3: 확정 사유와 누적 길이를 함께 로그(자막이 1줄로 빨리 끊기는 원인 확정용). 텍스트 내용은 미포함.
-        log.debug("\(LogTag.subtitle, privacy: .public) 자막 확정: 사유=\(reason.rawValue, privacy: .public), len=\(self.currentTranslation.count)")
+        log.debug("\(LogTag.subtitle, privacy: .public) 자막 확정(roll-up push): 사유=\(reason.rawValue, privacy: .public), len=\(self.currentTranslation.count)")
         silenceTask?.cancel(); silenceTask = nil
 
-        // 수정2: 확정 직전 정리를 한 번 더 적용한다. charBreak가 중복 구가 완성되기
-        // 전에 끊어 누적 버퍼에 반복 잔여가 남는 경우가 있어, 확정 줄에 중복이 고정되지
-        // 않도록 번역/원문 모두 collapseRepeats(즉시 반복) → dedupGlobalSentences(전역
-        // 중복 문장) 순으로 재정리한다.
-        let collapsedTranslation = Self.dedupGlobalSentences(Self.collapseRepeats(currentTranslation))
-        let collapsedSource = Self.dedupGlobalSentences(Self.collapseRepeats(currentSource))
-
-        // 공백 무시 비교(확정↔다음 줄 경계 중복 판정용).
-        func norm(_ s: String) -> String { s.filter { !$0.isWhitespace } }
-
-        // 수정2: 확정↔다음 줄 경계 중복 방지. 새로 확정할 번역(collapsed)이 직전 확정 줄과
-        // 공백 무시 동일하면 중복 확정으로 간주해 새로 확정하지 않는다(표시 유지). 누적 버퍼만
-        // 비우고, 직전 확정 줄을 그대로 holdSeconds 유지한다.
-        if !collapsedTranslation.isEmpty,
-           !confirmedTranslation.isEmpty,
-           norm(collapsedTranslation) == norm(confirmedTranslation) {
-            log.debug("\(LogTag.subtitle, privacy: .public) 자막 확정 무시: 직전 확정과 동일(중복 경계) len=\(collapsedTranslation.count, privacy: .public)")
-            currentTranslation = ""
-            currentSource = ""
-            scheduleHide()
-            return
-        }
-
-        if !collapsedTranslation.isEmpty { confirmedTranslation = collapsedTranslation }
-        if !collapsedSource.isEmpty { confirmedSource = collapsedSource }
+        // 확정 직전 정리(charBreak가 반복 구 완성 전에 끊어 잔여가 남는 경우 방지):
+        // collapseRepeats(즉시 반복) → dedupGlobalSentences(전역 중복 문장).
+        let collapsed = Self.dedupGlobalSentences(Self.collapseRepeats(currentTranslation))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         currentTranslation = ""
         currentSource = ""
+        guard !collapsed.isEmpty else { return }
 
-        scheduleHide()
-    }
-
-    /// 새 delta가 들어왔을 때: 보이게 하고 진행 중 숨김 타이머를 취소한다(문장이 계속 성장).
-    private func showAndCancelHide() {
-        hideTask?.cancel(); hideTask = nil
-        isVisible = true
-    }
-
-    /// 확정 줄을 holdSeconds만큼 유지 후 숨긴다(결정적 시간).
-    private func scheduleHide() {
-        hideTask?.cancel()
-        guard !confirmedTranslation.isEmpty else {
-            isVisible = false
-            hideTask = nil
-            return
-        }
-        isVisible = true
-        let nanos = UInt64(Self.holdSeconds * 1_000_000_000)
-        hideTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: nanos)
-            guard !Task.isCancelled, let self else { return }
-            // 그동안 새 delta가 와서 다음 문장이 자라기 시작했으면 내리지 않는다.
-            if self.currentTranslation.isEmpty {
-                self.log.debug("\(LogTag.subtitle, privacy: .public) scheduleHide fire: isVisible=false 전이(holdSeconds 경과)")
-                self.isVisible = false
+        // 경계/재번역 중복 방지: 직전 roll-up 줄과 공백 무시 동일하면 push하지 않는다.
+        func norm(_ s: String) -> String { s.filter { !$0.isWhitespace } }
+        if let last = rollupLines.last, norm(last) == norm(collapsed) {
+            log.debug("\(LogTag.subtitle, privacy: .public) roll-up push 무시: 직전 줄과 동일(중복 경계) len=\(collapsed.count, privacy: .public)")
+        } else {
+            rollupLines.append(collapsed)
+            if rollupLines.count > Self.maxRollupHistory {
+                rollupLines.removeFirst(rollupLines.count - Self.maxRollupHistory)
             }
         }
+        segmentMode = true
+        isVisible = true
+    }
+
+    /// 새 delta가 들어왔을 때: 보이게 한다(문장이 계속 성장 중).
+    private func showAndCancelHide() {
+        isVisible = true
     }
 
     /// 무음 fallback: 마지막 delta 이후 silenceTimeout 동안 조용하면 자동 확정한다.
