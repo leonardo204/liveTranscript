@@ -530,6 +530,12 @@ final class AppState {
         let p = provider
         audio.onChunk = { chunk in p.send(chunk) }
 
+        // VAD 발화 전이를 자막 무음 처리로 중계 → roll-up 자막이 STT 세그먼트 cadence가 아니라
+        // 실제 오디오 무음을 기준으로 사라진다(발화 중 plateau로 화면이 비워지던 문제 방지).
+        audio.onSpeechStateChange = { [weak self] speaking in
+            self?.subtitles.noteSpeechActivity(speaking: speaking)
+        }
+
         // 이벤트 스트림 소비(연결/상태/번역 텍스트) — MainActor에서 HUD/상태 갱신.
         // epoch 펜싱(spec 004 §7.5/§7.9): clearGeminiHandles에서 epoch가 증가하므로,
         // 이 Task가 캡처한 myEpoch와 현재 epoch가 다르면(=이미 교체/정지됨) stale 이벤트로 폐기.
@@ -555,6 +561,7 @@ final class AppState {
         // stale 이벤트를 handle 직전 가드에서 폐기하게 만든다(취소+펜싱 이중 방어).
         epoch &+= 1
         audio.onChunk = nil
+        audio.onSpeechStateChange = nil
         eventTask?.cancel()
         eventTask = nil
         // 현재 provider를 지역 변수로 분리한 뒤 즉시 self.provider를 비운다.

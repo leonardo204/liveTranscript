@@ -75,6 +75,12 @@ final class AudioInputManager {
     /// 현재 발화중 여부(메뉴 상태 표시용). VAD off면 항상 false.
     private(set) var isSpeaking = false
 
+    /// 발화 상태 **전이** 통지 훅(메인 액터). 실제 VAD 발화 시작(true)/종료(false)가 일어날 때만 호출된다.
+    /// AppState가 이를 자막 엔진의 무음 처리(roll-up idle)로 중계해, 자막이 STT 세그먼트 갱신
+    /// cadence가 아니라 **실제 오디오 무음**을 기준으로 사라지게 한다. VAD off면 전이가 없어 호출되지 않는다.
+    /// (메인 액터 격리 — 호출은 항상 `Task { @MainActor }` 내부에서 일어난다.)
+    var onSpeechStateChange: (@MainActor (Bool) -> Void)?
+
     /// VAD 모델 준비 상태(다운로드 중/준비됨/사용 불가).
     private(set) var vadStatus: VADModelStatus = .notLoaded
 
@@ -126,10 +132,12 @@ final class AudioInputManager {
         speakingSink.onChange = { [weak self] speaking in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if self.isSpeaking != speaking {
+                let changed = self.isSpeaking != speaking
+                if changed {
                     self.log.debug("\(LogTag.audio, privacy: .public) VAD 발화 전이: \(speaking ? "발화 시작" : "발화 종료", privacy: .public)")
                 }
                 self.isSpeaking = speaking
+                if changed { self.onSpeechStateChange?(speaking) }   // 전이 시에만 자막으로 중계
             }
         }
         statusSink.onChange = { [weak self] status in

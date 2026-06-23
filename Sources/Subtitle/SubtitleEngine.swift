@@ -77,12 +77,20 @@ final class SubtitleEngine {
     /// Gemini delta 경로와 한 세션에서 섞이지 않으며, `reset()`에서 false로 되돌린다.
     private(set) var segmentMode = false
 
-    /// roll-up 무음 정리 타이머(긴 무음에만 전체 정리 — 문장마다 페이드하지 않기 위함).
-    @ObservationIgnored private var idleClearTask: Task<Void, Never>?
+    /// VAD가 통지한 **실제 발화 중** 여부(`noteSpeechActivity`로 설정). true인 동안에는 무음 정리
+    /// 타이머를 걸지 않아, STT volatile이 정체(plateau)해 세그먼트 갱신이 멈춰도 발화 중에는
+    /// 자막이 비워지지 않는다. VAD가 꺼져 통지가 없으면 false로 남아 세그먼트 cadence 기반으로 폴백.
+    @ObservationIgnored private var speechActive = false
 
-    /// roll-up 모드에서 마지막 세그먼트 이후 이 시간(초) 동안 조용하면 화면을 정리한다.
-    /// 문장 간 공백마다 사라지지 않도록 holdSeconds(2s)보다 충분히 길게 둔다.
-    private static let rollupIdleClearSeconds: Double = 8.0
+    /// roll-up 무음 정리 타이머. 발화 종료(VAD offset) 또는 마지막 세그먼트 이후 시작되며,
+    /// `rollupSilenceClearSeconds` 동안 새 발화가 없으면 화면을 비우고 누적을 정리한다.
+    @ObservationIgnored private var silenceClearTask: Task<Void, Never>?
+
+    /// **무음 정리 임계(초)**. 일반 대화의 짧은 공백(2~3초)에는 자막을 **유지·누적(roll-up)**하고,
+    /// 이 시간 이상 **연속 무음**일 때만 화면을 비운다 → 다음 발화는 깨끗한 화면에서 새로 시작한다
+    /// (사라졌다 이전 줄과 합쳐지는 동작 방지 — 일반 자막 앱의 표준 동작).
+    /// VAD가 켜져 있으면 실제 **발화 종료 시점**부터, 꺼져 있으면 마지막 세그먼트부터 측정한다.
+    private static let rollupSilenceClearSeconds: Double = 8.0
 
     /// roll-up 문장 히스토리 버퍼 상한(문장 수). 화면 줄수(maxLines) 제한은 **뷰(lineLimit+.head)**가
     /// 처리하므로, 여기선 마지막 N개 화면 줄을 채우기에 충분한 문장만 보관한다(메모리 상한).
@@ -260,26 +268,61 @@ final class SubtitleEngine {
             }
         }
 
-        // roll-up은 문장마다 페이드하지 않는다 — 짧은 hide/silence 타이머를 끄고, 긴 무음 정리만 건다.
+        // roll-up은 문장마다 페이드하지 않는다 — 짧은 hide/silence 타이머를 끄고, 무음 정리 타이머만 건다.
         hideTask?.cancel(); hideTask = nil
         silenceTask?.cancel(); silenceTask = nil
         isVisible = true
-        armIdleClear()
+        armSilenceClear()
     }
 
-    /// roll-up 모드 무음 정리: 마지막 세그먼트 이후 rollupIdleClearSeconds 동안 조용하면 화면을 비운다.
-    /// 세그먼트마다 재설정되므로 말이 이어지는 동안에는 유지된다(문장 사이 공백마다 사라지지 않음).
-    private func armIdleClear() {
-        idleClearTask?.cancel()
-        let nanos = UInt64(Self.rollupIdleClearSeconds * 1_000_000_000)
-        idleClearTask = Task { [weak self] in
+    /// roll-up 무음 정리 타이머를 (재)무장한다. 세그먼트마다, 그리고 발화 종료(VAD offset) 시 호출된다.
+    ///
+    /// `rollupSilenceClearSeconds` 동안 새 발화가 없으면 화면을 비우고 누적을 정리한다 → 다음 발화는
+    /// 깨끗한 화면에서 새로 시작한다(짧은 무음에는 발동하지 않아 자막이 유지·누적된다).
+    /// **발화 중(speechActive)에는 무장하지 않는다** — STT가 잠시 정체해 세그먼트가 멈춰도 말하는
+    /// 동안엔 자막을 비우지 않기 위함. VAD off면 speechActive=false라 마지막 세그먼트 기준으로 폴백한다.
+    private func armSilenceClear() {
+        silenceClearTask?.cancel()
+        guard !speechActive else { silenceClearTask = nil; return }
+
+        let nanos = UInt64(Self.rollupSilenceClearSeconds * 1_000_000_000)
+        silenceClearTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: nanos)
             guard !Task.isCancelled, let self else { return }
-            self.log.debug("\(LogTag.subtitle, privacy: .public) roll-up idle clear: 무음 \(Self.rollupIdleClearSeconds, privacy: .public)s → 화면 정리")
+            self.log.debug("\(LogTag.subtitle, privacy: .public) roll-up 무음 정리: 연속 무음 \(Self.rollupSilenceClearSeconds, privacy: .public)s → 화면 비움(다음 발화는 새로 시작)")
             self.rollupLines = []
             self.currentTranslation = ""
             self.currentSource = ""
             self.isVisible = false
+        }
+    }
+
+    /// VAD 발화 상태 전이 통지(AppState가 `AudioInputManager.onSpeechStateChange`를 중계).
+    ///
+    /// roll-up 자막의 무음 처리를 **STT 세그먼트 cadence가 아니라 실제 오디오 무음**에 맞춘다.
+    /// - `speaking=true`(발화 시작): idle 타이머를 끄고, 보일 내용이 있으면 화면을 켠다. 이후 STT가
+    ///   잠시 정체(plateau)해 세그먼트가 안 와도 발화 중엔 자막이 사라지지 않는다.
+    /// - `speaking=false`(발화 종료): 이 시점부터 무음 타이머(hide 6s / clear 18s)를 건다 → 진짜
+    ///   무음 길이에 비례해 화면을 숨기고(짧은 무음) 누적까지 정리(긴 무음)한다.
+    ///
+    /// delta(Gemini) 모드는 turnComplete/무음 fallback이 별도로 처리하므로 타이머 조작은 segmentMode일 때만 한다.
+    /// VAD가 꺼져 이 신호가 오지 않으면 `speechActive`가 false로 남아 세그먼트 cadence 기반으로 폴백된다.
+    func noteSpeechActivity(speaking: Bool) {
+        // 상태는 **항상** 기록한다 — onset이 첫 세그먼트(segmentMode 전환)보다 먼저 도착하는 경우가
+        // 흔하다(전사 시작 시점). guard 뒤에서 기록하면 그 첫 onset을 놓쳐 발화 중에도 타이머가 살아
+        // 자막이 사라진다(실측 버그). 그래서 guard보다 먼저 기록한다.
+        speechActive = speaking
+        guard segmentMode else { return }
+        if speaking {
+            // 발화 시작 → 무음 정리 타이머 취소. 짧은 무음 뒤 재개해도 자막이 유지·누적된다.
+            silenceClearTask?.cancel(); silenceClearTask = nil
+            // 비울 내용이 있으면(직전 누적/진행 줄) 화면을 다시 켠다.
+            if !rollupLines.isEmpty || !currentSource.isEmpty || !currentTranslation.isEmpty {
+                isVisible = true
+            }
+        } else {
+            // 실제 무음 시작 → 정리 타이머 무장(연속 무음이 임계를 넘으면 화면을 비운다).
+            armSilenceClear()
         }
     }
 
@@ -315,13 +358,14 @@ final class SubtitleEngine {
         log.debug("\(LogTag.subtitle, privacy: .public) 자막 reset")
         hideTask?.cancel(); hideTask = nil
         silenceTask?.cancel(); silenceTask = nil
-        idleClearTask?.cancel(); idleClearTask = nil
+        silenceClearTask?.cancel(); silenceClearTask = nil
         currentTranslation = ""
         currentSource = ""
         confirmedTranslation = ""
         confirmedSource = ""
         rollupLines = []
         segmentMode = false
+        speechActive = false             // VAD 발화 상태도 초기화(다음 세션은 무음 기준으로 깨끗하게 시작)
         pendingGenerationReset = false   // generation 경계 상태도 초기화(다음 세션은 깨끗하게 시작)
         isVisible = false
     }
