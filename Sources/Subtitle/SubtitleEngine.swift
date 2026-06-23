@@ -77,19 +77,14 @@ final class SubtitleEngine {
     /// Gemini delta 경로와 한 세션에서 섞이지 않으며, `reset()`에서 false로 되돌린다.
     private(set) var segmentMode = false
 
-    /// VAD가 통지한 **실제 발화 중** 여부(`noteSpeechActivity`로 설정). true인 동안에는 무음 정리
-    /// 타이머를 걸지 않아, STT volatile이 정체(plateau)해 세그먼트 갱신이 멈춰도 발화 중에는
-    /// 자막이 비워지지 않는다. VAD가 꺼져 통지가 없으면 false로 남아 세그먼트 cadence 기반으로 폴백.
-    @ObservationIgnored private var speechActive = false
-
-    /// roll-up 무음 정리 타이머. 발화 종료(VAD offset) 또는 마지막 세그먼트 이후 시작되며,
-    /// `rollupSilenceClearSeconds` 동안 새 발화가 없으면 화면을 비우고 누적을 정리한다.
+    /// roll-up 무음 정리 타이머. 매 ingestSegment(STT heartbeat)마다 재무장되며, 이 시간 동안
+    /// STT가 완전히 조용하면 화면을 비우고 누적을 정리한다.
     @ObservationIgnored private var silenceClearTask: Task<Void, Never>?
 
     /// **무음 정리 임계(초)**. 일반 대화의 짧은 공백(2~3초)에는 자막을 **유지·누적(roll-up)**하고,
-    /// 이 시간 이상 **연속 무음**일 때만 화면을 비운다 → 다음 발화는 깨끗한 화면에서 새로 시작한다
-    /// (사라졌다 이전 줄과 합쳐지는 동작 방지 — 일반 자막 앱의 표준 동작).
-    /// VAD가 켜져 있으면 실제 **발화 종료 시점**부터, 꺼져 있으면 마지막 세그먼트부터 측정한다.
+    /// 이 시간 이상 **STT가 연속 무음**일 때만 화면을 비운다 → 다음 발화는 깨끗한 화면에서 새로 시작한다
+    /// (사라졌다 이전 줄과 합쳐지는 동작 방지 — 일반 자막 앱의 표준 동작). STT는 말하는 동안 매 버퍼마다
+    /// volatile을 흘리므로, 이 무음은 곧 "화자가 실제로 말을 멈춘 구간"이다(VAD offset 비의존).
     private static let rollupSilenceClearSeconds: Double = 8.0
 
     /// roll-up 문장 히스토리 버퍼 상한(문장 수). 화면 줄수(maxLines) 제한은 **뷰(lineLimit+.head)**가
@@ -281,16 +276,15 @@ final class SubtitleEngine {
         armSilenceClear()
     }
 
-    /// roll-up 무음 정리 타이머를 (재)무장한다. 세그먼트마다, 그리고 발화 종료(VAD offset) 시 호출된다.
+    /// roll-up 무음 정리 타이머를 (재)무장한다. **모든 ingestSegment(volatile/final)마다** 호출되어
+    /// 재설정되므로, 사실상 "STT가 마지막으로 무언가를 낸 뒤 경과 시간"을 잰다(STT heartbeat).
     ///
-    /// `rollupSilenceClearSeconds` 동안 새 발화가 없으면 화면을 비우고 누적을 정리한다 → 다음 발화는
-    /// 깨끗한 화면에서 새로 시작한다(짧은 무음에는 발동하지 않아 자막이 유지·누적된다).
-    /// **발화 중(speechActive)에는 무장하지 않는다** — STT가 잠시 정체해 세그먼트가 멈춰도 말하는
-    /// 동안엔 자막을 비우지 않기 위함. VAD off면 speechActive=false라 마지막 세그먼트 기준으로 폴백한다.
+    /// STT는 말하는 동안 매 오디오 버퍼마다 volatile을 흘리므로, 발화가 이어지는 한 타이머가 계속
+    /// 재설정돼 발동하지 않는다(긴 문장으로 final 사이가 벌어지거나 STT가 같은 가설을 반복해도 안전).
+    /// `rollupSilenceClearSeconds` 동안 STT가 완전히 조용할 때만 발동 → 진짜 무음에서만 화면을 비운다.
+    /// (VAD offset에 의존하지 않는다 — 시스템탭 연속 오디오에선 offset이 신뢰 불가하게 굳는 사례 관측.)
     private func armSilenceClear() {
         silenceClearTask?.cancel()
-        guard !speechActive else { silenceClearTask = nil; return }
-
         let nanos = UInt64(Self.rollupSilenceClearSeconds * 1_000_000_000)
         silenceClearTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: nanos)
@@ -305,30 +299,16 @@ final class SubtitleEngine {
 
     /// VAD 발화 상태 전이 통지(AppState가 `AudioInputManager.onSpeechStateChange`를 중계).
     ///
-    /// roll-up 자막의 무음 처리를 **STT 세그먼트 cadence가 아니라 실제 오디오 무음**에 맞춘다.
-    /// - `speaking=true`(발화 시작): idle 타이머를 끄고, 보일 내용이 있으면 화면을 켠다. 이후 STT가
-    ///   잠시 정체(plateau)해 세그먼트가 안 와도 발화 중엔 자막이 사라지지 않는다.
-    /// - `speaking=false`(발화 종료): 이 시점부터 무음 타이머(hide 6s / clear 18s)를 건다 → 진짜
-    ///   무음 길이에 비례해 화면을 숨기고(짧은 무음) 누적까지 정리(긴 무음)한다.
-    ///
-    /// delta(Gemini) 모드는 turnComplete/무음 fallback이 별도로 처리하므로 타이머 조작은 segmentMode일 때만 한다.
-    /// VAD가 꺼져 이 신호가 오지 않으면 `speechActive`가 false로 남아 세그먼트 cadence 기반으로 폴백된다.
+    /// **무음 정리는 STT heartbeat(`armSilenceClear`)가 주도**하므로 여기서 타이머를 만지지 않는다.
+    /// VAD는 발화 시작(onset) 시 **즉시 표시**를 켜는 보조 역할만 한다(STT 첫 volatile보다 살짝 빠른
+    /// 반응). VAD 발화 종료(offset)는 이 환경에서 신뢰 불가하게 굳는 사례가 있어 무음 판정에 쓰지 않는다.
+    /// delta(Gemini) 모드는 turnComplete/무음 fallback이 별도 처리하므로 segmentMode일 때만 관여한다.
     func noteSpeechActivity(speaking: Bool) {
-        // 상태는 **항상** 기록한다 — onset이 첫 세그먼트(segmentMode 전환)보다 먼저 도착하는 경우가
-        // 흔하다(전사 시작 시점). guard 뒤에서 기록하면 그 첫 onset을 놓쳐 발화 중에도 타이머가 살아
-        // 자막이 사라진다(실측 버그). 그래서 guard보다 먼저 기록한다.
-        speechActive = speaking
-        guard segmentMode else { return }
-        if speaking {
-            // 발화 시작 → 무음 정리 타이머 취소. 짧은 무음 뒤 재개해도 자막이 유지·누적된다.
-            silenceClearTask?.cancel(); silenceClearTask = nil
-            // 비울 내용이 있으면(직전 누적/진행 줄) 화면을 다시 켠다.
-            if !rollupLines.isEmpty || !currentSource.isEmpty || !currentTranslation.isEmpty {
-                isVisible = true
-            }
-        } else {
-            // 실제 무음 시작 → 정리 타이머 무장(연속 무음이 임계를 넘으면 화면을 비운다).
-            armSilenceClear()
+        guard segmentMode, speaking else { return }
+        // 보일 내용이 있으면 즉시 표시(무음 hide 후 재개 시 빠른 복귀). 타이머는 건드리지 않는다 —
+        // 곧 도착할 STT volatile들이 armSilenceClear로 자연히 재무장한다.
+        if !rollupLines.isEmpty || !currentSource.isEmpty || !currentTranslation.isEmpty {
+            isVisible = true
         }
     }
 
@@ -371,7 +351,6 @@ final class SubtitleEngine {
         confirmedSource = ""
         rollupLines = []
         segmentMode = false
-        speechActive = false             // VAD 발화 상태도 초기화(다음 세션은 무음 기준으로 깨끗하게 시작)
         pendingGenerationReset = false   // generation 경계 상태도 초기화(다음 세션은 깨끗하게 시작)
         isVisible = false
     }

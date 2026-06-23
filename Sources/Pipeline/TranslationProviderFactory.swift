@@ -37,7 +37,6 @@ struct TranslationProviderFactory {
             return ComposedTranslationProvider(
                 stt: stt,
                 transform: transform,
-                showSource: settings.showSourceText,
                 capabilities: desc.engineCapabilities
             )
         case .onDeviceTranscribe:

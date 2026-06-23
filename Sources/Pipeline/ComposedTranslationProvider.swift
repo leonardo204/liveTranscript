@@ -21,8 +21,6 @@ actor ComposedTranslationProvider: TranslationProvider {
 
     private let stt: any SpeechToTextStage
     private let transform: (any TextTransformStage)?
-    /// 원문 자막을 함께 낼지(`.sourceSegment` 방출 여부). 번역 자막은 항상 방출한다.
-    private let showSource: Bool
 
     /// STT(및 번역) 세그먼트를 PipelineEvent로 사상해 방출하는 단일 펌프 Task. stop에서 cancel.
     private var pumpTask: Task<Void, Never>?
@@ -32,18 +30,15 @@ actor ComposedTranslationProvider: TranslationProvider {
     init(
         stt: any SpeechToTextStage,
         transform: (any TextTransformStage)?,
-        showSource: Bool,
         capabilities: EngineCapabilities
     ) {
         self.stt = stt
         self.transform = transform
-        self.showSource = showSource
         self.capabilities = capabilities
     }
 
     func start() async -> AsyncStream<PipelineEvent> {
         let sttStream = await stt.start()
-        let showSource = self.showSource
         let transform = self.transform
 
         return AsyncStream<PipelineEvent> { continuation in
@@ -52,9 +47,15 @@ actor ComposedTranslationProvider: TranslationProvider {
                 continuation.yield(.state(.ready))
 
                 if let transform {
-                    // 번역 경로: STT 세그먼트를 (a) showSource면 .sourceSegment로 방출하고
+                    // 번역 경로: STT 세그먼트를 (a) .sourceSegment로 **항상** 방출하고
                     // (b) 번역 단계 입력으로 전달한다. 번역 출력은 .translatedSegment로 방출.
                     // 입력/출력을 별도 Task로 처리해 한쪽이 다른 쪽을 블록하지 않게 한다.
+                    //
+                    // ⚠️ 원문 세그먼트를 showSource와 무관하게 항상 방출하는 이유: 화면 표시는 뷰가
+                    // showSourceText로 게이팅하지만, 이 volatile 스트림은 자막 엔진의 **무음 감지
+                    // heartbeat**로도 쓰인다. STT가 말하는 동안 매 오디오 버퍼마다 흘리는 유일한 고빈도
+                    // 신호라, 이게 끊기면(showSource=false로 막으면) 무음 정리 타이머가 발화 도중
+                    // 오발동한다(긴 문장의 final 사이 공백 + 신뢰 불가한 VAD offset). spec 007 §5 참조.
                     let (transformInput, inputCont) = AsyncStream<TextSegmentEvent>.makeStream()
                     let transformOutput = transform.transform(transformInput)
 
@@ -67,7 +68,7 @@ actor ComposedTranslationProvider: TranslationProvider {
 
                     // STT 입력 펌프 — 원문 방출 + 번역 입력 전달.
                     for await ev in sttStream {
-                        if case .segment(let text, let isFinal) = ev, showSource {
+                        if case .segment(let text, let isFinal) = ev {
                             continuation.yield(.sourceSegment(text: text, isFinal: isFinal))
                         } else if case .info(let msg) = ev {
                             continuation.yield(.info(msg))
