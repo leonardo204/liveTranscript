@@ -24,19 +24,57 @@ actor AppleTranslationStage: TextTransformStage {
 
     private static let log = Logger(subsystem: AppConfig.bundleIdentifier, category: "Pipeline")
 
+    /// source==target(동일 언어)이면 번역을 생략하고 STT 원문을 그대로 통과시킨다(전사 모드).
+    /// Apple Translation은 동일 언어쌍(예: ko→ko)을 거부하므로(unsupportedLanguagePairing),
+    /// 그대로 두면 모든 final이 실패하며 원문이 `?? text` 폴백으로 새어 들어가고 로그가 스팸된다.
+    /// 미리 판정해 host 설정/번역 호출을 건너뛴다(언어 base만 비교 — ko vs ko-KR도 동일 취급).
+    private let isPassthrough: Bool
+
     init(sourceLanguageCode: String, targetLanguageCode: String, host: TranslationSessionHost) {
         self.sourceLanguageCode = sourceLanguageCode
         self.targetLanguageCode = targetLanguageCode
         self.host = host
+        self.isPassthrough = Self.sameBaseLanguage(sourceLanguageCode, targetLanguageCode)
+    }
+
+    /// 지역/스크립트 태그를 떼고 언어 base 코드만 비교한다(ko_KR / ko-KR / ko → "ko").
+    private static func sameBaseLanguage(_ a: String, _ b: String) -> Bool {
+        func base(_ s: String) -> String {
+            s.lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" }).first.map(String.init) ?? s.lowercased()
+        }
+        return base(a) == base(b)
     }
 
     nonisolated func transform(_ input: AsyncStream<TextSegmentEvent>) -> AsyncStream<TextSegmentEvent> {
         let host = self.host
         let source = self.sourceLanguageCode
         let target = self.targetLanguageCode
+        let passthrough = self.isPassthrough
 
         return AsyncStream<TextSegmentEvent> { continuation in
             let task = Task {
+                // 동일 언어 → 번역 불필요. host 설정/번역을 건너뛰고 final 원문을 그대로 자막으로 통과.
+                if passthrough {
+                    Self.log.info("\(LogTag.translate, privacy: .public) src==tgt(\(source, privacy: .public)) → 번역 생략, 원문 통과(전사 모드)")
+                    for await ev in input {
+                        if Task.isCancelled { break }
+                        switch ev {
+                        case .segment(let text, let isFinal):
+                            guard isFinal else { continue }   // final-only(깜빡임 제거) 유지
+                            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !trimmed.isEmpty else { continue }
+                            continuation.yield(.segment(text: text, isFinal: true))
+                            await self.logRequest(text: text, isFinal: true)
+                        case .info(let msg):
+                            continuation.yield(.info(msg))
+                        case .failure(let reason):
+                            continuation.yield(.failure(reason))
+                        }
+                    }
+                    continuation.finish()
+                    return
+                }
+
                 // 세션 발급 요청(언어 설정). 최초 1회.
                 await host.configure(source: source, target: target)
 
