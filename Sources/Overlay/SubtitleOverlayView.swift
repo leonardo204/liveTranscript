@@ -53,8 +53,10 @@ struct SubtitleOverlayView: View {
                 Spacer().frame(height: topPad)
                 subtitleBox(translation: translation, source: source, style: style, maxBoxWidth: maxBoxWidth)
                     .opacity(visible ? 1 : 0)
+                    // 표시/숨김(나타남·사라짐)만 페이드한다. **텍스트 변경(roll-up 줄 푸시)에는 애니메이션을
+                    // 걸지 않는다** — 글로우 5겹 멀티라인 박스를 0.25s 동안 매 프레임 보간 렌더하면 줄이
+                    // 굴러갈 때마다 프레임 드랍/버벅임이 생긴다. roll-up 줄 갱신은 즉시 반영(스냅)한다.
                     .animation(.easeInOut(duration: 0.25), value: visible)
-                    .animation(.easeInOut(duration: 0.25), value: translation)
                 Spacer(minLength: 0)
             }
             // 바깥 컨테이너는 화면 전체를 채우고 가로 중앙 정렬 — 박스만 maxBoxWidth로
@@ -98,15 +100,12 @@ struct SubtitleOverlayView: View {
     private func subtitleBox(translation: String, source: String, style: SubtitleStyle, maxBoxWidth: CGFloat) -> some View {
         VStack(alignment: style.align.frameAlignment.horizontal, spacing: 6) {
             if engine.segmentMode {
-                // roll-up: 누적 문장을 **전체 높이로 렌더**(fixedSize vertical)한 뒤, maxLines 줄 높이로
-                // 컨테이너를 제한 + 하단 정렬 + 클립 → 넘치는 **위쪽(오래된)** 줄이 잘리고 **아래(최신)**가
-                // 남는다. ⚠️ fixedSize 없이 frame(maxHeight:)만 쓰면 Text가 제안 높이에 맞춰 '앞(오래된)'
-                // 줄만 남기고 잘리므로(최신이 안 보임) 반드시 fixedSize로 전체 렌더를 강제해야 한다.
-                // 내용이 maxLines보다 적으면 frame이 내용 높이로 줄어 위쪽 빈 공간이 생기지 않는다.
-                StyledSubtitleText(text: translation, size: style.fontSize, style: style, unlimitedLines: true)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxHeight: style.lineHeight * CGFloat(max(1, style.maxLines)), alignment: .bottom)
-                    .clipped()
+                // roll-up: 누적 문장을 전체 높이로 렌더한 뒤 maxLines 줄 높이로 **하단 정렬 클립**해
+                // 넘치는 **위쪽(오래된)** 줄을 잘라낸다. 클립과 효과(외곽선/글로우)의 순서가 중요해
+                // (잘려나간 줄의 그림자가 보이는 영역으로 새지 않도록) StyledSubtitleText 내부에서
+                // **클립 → 효과** 순으로 처리한다(clipToBottomLines 경로).
+                StyledSubtitleText(text: translation, size: style.fontSize, style: style,
+                                   clipToBottomLines: max(1, style.maxLines))
             } else {
                 StyledSubtitleText(text: translation, size: style.fontSize, style: style)
             }

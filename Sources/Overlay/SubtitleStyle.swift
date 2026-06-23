@@ -159,18 +159,36 @@ struct StyledSubtitleText: View {
     /// false(기본)면 style.maxLines로 제한(delta/Gemini·원문 줄 등).
     var unlimitedLines: Bool = false
 
+    /// roll-up 전용: 마지막 N(시각적)줄 높이로 **하단 정렬 클립**한 뒤 외곽선/글로우를 적용한다.
+    /// 핵심은 **클립을 효과보다 먼저** 적용하는 것 — 위로 굴러 사라진 줄의 글자가 클립 단계에서
+    /// 제거된 뒤에 그림자/글로우를 계산하므로, 잘려나간 줄의 그림자가 보이는 영역으로 새어
+    /// "글자 없는 글로우 띠"로 남던 문제를 없앤다(효과를 먼저 입히면 그 그림자가 클립 안으로 침범).
+    var clipToBottomLines: Int? = nil
+
     var body: some View {
         // modifier 체이닝의 타입 추론 부담을 줄이기 위해 단계적 변수 + 조건 분기로 처리.
-        let base = Text(text)
+        let core = Text(text)
             .font(style.font(size: size))
             .foregroundStyle(style.textColor)
             .multilineTextAlignment(style.align.textAlignment)
-            .lineLimit(unlimitedLines ? nil : style.maxLines)
+            .lineLimit((unlimitedLines || clipToBottomLines != nil) ? nil : style.maxLines)
             .truncationMode(.tail)
 
-        return base
-            .modifier(StrokeShadowModifier(enabled: style.strokeEnabled, color: style.strokeColor))
-            .modifier(GlowModifier(enabled: style.glowEnabled, color: style.glowColor, radius: style.glowRadius))
+        return Group {
+            if let n = clipToBottomLines {
+                // ⚠️ 클립(glyph-only) → 그다음 효과. 순서가 핵심(위 주석 참고).
+                core
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxHeight: style.lineHeight * CGFloat(max(1, n)), alignment: .bottom)
+                    .clipped()
+                    .modifier(StrokeShadowModifier(enabled: style.strokeEnabled, color: style.strokeColor))
+                    .modifier(GlowModifier(enabled: style.glowEnabled, color: style.glowColor, radius: style.glowRadius))
+            } else {
+                core
+                    .modifier(StrokeShadowModifier(enabled: style.strokeEnabled, color: style.strokeColor))
+                    .modifier(GlowModifier(enabled: style.glowEnabled, color: style.glowColor, radius: style.glowRadius))
+            }
+        }
     }
 }
 

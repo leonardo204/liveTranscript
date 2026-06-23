@@ -102,7 +102,13 @@ final class SubtitleEngine {
     /// - delta(Gemini) 모드: 누적 중이면 누적분, 아니면 마지막 확정분.
     var displayTranslation: String {
         if segmentMode {
-            let lines = currentTranslation.isEmpty ? rollupLines : rollupLines + [currentTranslation]
+            // 뷰는 마지막 maxLines(시각)줄만 클립해 보여주므로, 그리기에 넘길 문장도 그만큼만 추린다.
+            // 누적 전체(maxRollupHistory)를 글로우 5겹으로 offscreen 렌더한 뒤 버리던 비용을 줄여 roll-up
+            // 프레임 드랍을 완화한다. 줄바꿈을 감안해 maxLines+2 문장을 남기면 항상 maxLines 시각줄 이상이
+            // 확보된다(짧은 문장=문장당 1줄, 긴 문장=문장당 여러 줄 모두 충족).
+            let keep = (settings?.subtitleMaxLines ?? 2) + 2
+            let recent = Array(rollupLines.suffix(keep))
+            let lines = currentTranslation.isEmpty ? recent : recent + [currentTranslation]
             return lines.joined(separator: "\n")
         }
         return currentTranslation.isEmpty ? confirmedTranslation : currentTranslation
