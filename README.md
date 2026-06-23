@@ -1,8 +1,9 @@
 # liveTranslate
 
-Google **Gemini 3.5 Live Translate** 기반의 macOS 실시간 자막 번역 앱입니다.
+macOS 실시간 자막 번역 앱입니다. **Gemini 3.5 Live Translate**(클라우드, API 키) 또는
+**Apple 온디바이스 번역**(Apple Speech + Translation, **키 불필요**) 엔진을 선택해 사용합니다.
 맥에서 흘러나오는 소리(또는 마이크 입력)를 실시간으로 받아 지정한 언어로 번역하고,
-그 결과를 **영화 자막처럼 화면 위에 오버레이**로 띄웁니다. 선택적으로 **번역 음성도 재생**할 수 있습니다.
+그 결과를 **영화 자막처럼 화면 위에 roll-up 오버레이**로 띄웁니다. 선택적으로 **번역 음성도 재생**할 수 있습니다.
 
 메뉴바 상주(menu bar) 네이티브 앱으로, Dock 아이콘 없이 가볍게 동작합니다.
 
@@ -14,8 +15,9 @@ Google **Gemini 3.5 Live Translate** 기반의 macOS 실시간 자막 번역 앱
   BlackHole 등 가상 루프백 장치나 화면 녹화 권한이 **불필요**합니다(오디오 캡처 권한만 요구).
 - **다양한 입력 소스** — 시스템 오디오(Core Audio Tap) · 마이크 · BlackHole 등 루프백 장치를 지원하며,
   자동 선택(BlackHole 감지 시 사용 → 없으면 시스템 탭 → 마이크)도 가능합니다.
+- **엔진 선택(클라우드/온디바이스)** — Gemini Live(클라우드, API 키) 또는 Apple Speech+Translation(온디바이스, **키 불필요**)을 모델 카탈로그에서 선택합니다. 엔진 능력에 따라 설정 UI가 자동 게이팅됩니다.
 - **Silero VAD(음성 활동 감지)** — FluidAudio(CoreML Silero VAD)로 음악·소음을 거르고 **발화 구간만** 전송해 API 비용을 절감합니다(기본 ON, 모델 로드 실패 시 자동 우회).
-- **영화 자막식 오버레이** — 최상위·클릭 통과 투명 창에 자막을 누적 표시하고 페이드 처리합니다.
+- **영화 자막식 roll-up 오버레이** — 최상위·클릭 통과 투명 창에 자막을 여러 줄로 누적(roll-up)해 위로 굴려 표시합니다. 클라우드(누적 delta)·온디바이스(세그먼트) 양 엔진이 **동일한 표시 모델**을 쓰고, 무음 시 자동 정리합니다.
 - **자막 스타일 설정** — 폰트/크기/두께/글자색/외곽선/글로우/배경 박스/정렬/최대 줄수를 실시간 미리보기로 조정합니다.
 - **번역 음성 재생(선택)** — 번역된 음성(24kHz)을 재생할 수 있고, **출력 장치 선택**과 **원문 오디오 덕킹**(재생 중 시스템 볼륨 자동 감소)을 지원합니다.
 - **실시간 비용 추정** — 세션 비용(전송/수신/총 USD)을 HUD에 표시하고 누적 비용을 설정에 저장합니다.
@@ -77,12 +79,12 @@ make clean    # 빌드 산출물 + .xcodeproj 삭제
 
 ```
 입력 오디오 → VAD(Silero) 게이트 → 16kHz mono PCM(100ms 청크)
-   → Gemini 3.5 Live Translate (WebSocket)
-   → 번역 텍스트(자막) + 선택적 번역 음성(24kHz)
-   → 자막 오버레이 / 음성 재생
+   ├─[클라우드] Gemini 3.5 Live Translate(WebSocket) → 번역 텍스트(누적 delta) + 선택적 번역 음성(24kHz)
+   └─[온디바이스] Apple SpeechTranscriber(STT) → Apple Translation(MT) → 번역 텍스트(세그먼트)
+   → 자막 roll-up 오버레이 / (클라우드) 음성 재생
 ```
 
-- 자막 본문은 `outputAudioTranscription` delta로 수신해 누적·확정합니다.
+- 자막은 **누적(delta)·세그먼트 두 입력 모델을 하나의 roll-up 표시로 통일**하고, STT/스트림 출력 heartbeat를 기준으로 연속 무음 시 화면을 정리합니다 → [자막 아키텍처(008)](specs/008-subtitle-rendering-architecture.md).
 - 번역 음성은 재생을 켠 경우에만 디코드/재생합니다(끄면 폐기).
 
 ---
@@ -91,11 +93,17 @@ make clean    # 빌드 산출물 + .xcodeproj 삭제
 
 - [설계 스펙 (001)](specs/001-liveTranslate-design.md) — 전체 아키텍처, 마일스톤, 비용 계획
 - [Gemini Live & 오디오 (002)](specs/002-gemini-live-translate-and-audio.md) — Live Translate 사용법(검증 사실), 오디오 피드백 루프 재발 방지
+- [번역 파이프라인 추상화 (004)](specs/004-translation-pipeline-architecture.md) — 공통 API 레이어 + Stage 파이프라인(엔진 플러그인 구조)
+- [모델 카탈로그 + 설정 (005)](specs/005-model-catalog-and-settings.md) — JSON 모델 레지스트리 + 엔진/능력 기반 UI
+- [Apple Speech 오프라인 번역 (007)](specs/007-apple-speech-offline-translate.md) — 온디바이스 STT+번역(키 불필요, macOS 26+)
+- [자막 표시 아키텍처 (008)](specs/008-subtitle-rendering-architecture.md) — 누적/세그먼트 통합 roll-up + STT heartbeat 무음 처리 + 글로우 클립 렌더
 - [릴리스 & 자동 업데이트 가이드](ref-docs/claude/release-guide.md) — Sparkle 기반 배포/공증/appcast 절차
 
 ---
 
 ## 비용 안내
+
+비용은 **클라우드(Gemini) 엔진에만** 적용됩니다 — 온디바이스(Apple Speech+Translation) 엔진은 API 비용이 없습니다(전력만 사용).
 
 `gemini-3.5-live-translate-preview`는 **프리뷰**이며 단가는 변동될 수 있습니다.
 오디오 입력 $3.50 / 1M tokens, 오디오 출력 $21.00 / 1M tokens(출력이 비용의 ~85%)이며,
