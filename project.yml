@@ -20,8 +20,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "0.4.0"
+    CURRENT_PROJECT_VERSION: "4"
     # 서명: 개인 팀 자동 서명. project.yml에 고정하여 xcodegen 재생성에도 유지됨.
     # (Xcode UI에서 바꾼 설정은 .xcodeproj=생성물이라 다음 generate 때 사라지므로 여기서 관리)
     CODE_SIGN_STYLE: Automatic
