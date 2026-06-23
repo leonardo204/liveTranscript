@@ -54,6 +54,7 @@
 - [005 모델 카탈로그 + 설정](specs/005-model-catalog-and-settings.md) — JSON 모델 레지스트리 + 모델 탭 + 능력 기반 UI
 - [006 로깅 정책](specs/006-logging-policy.md) — 계층 추적 + 체크포인트 + LogTag prefix
 - [007 Apple Speech 오프라인 번역](specs/007-apple-speech-offline-translate.md) — 온디바이스 STT+번역(키 불필요, macOS 26+) + P1-A Stage 구현
+- [008 자막 표시 아키텍처](specs/008-subtitle-rendering-architecture.md) — 누적/세그먼트 통합 roll-up + STT heartbeat 무음 처리 + 글로우 클립 렌더 (재사용 참조 표준)
 - [릴리스 가이드](ref-docs/claude/release-guide.md) — Sparkle 배포/공증/appcast 절차
 
 ### 핵심 규칙
@@ -61,6 +62,7 @@
 - `translationConfig`는 **`generationConfig` 내부**에 둔다(top-level은 close 1007 거부) → [002](specs/002-gemini-live-translate-and-audio.md)
 - systemTap은 **자기 프로세스를 탭에서 제외**한다(번역 음성 재생 시 피드백 루프 방지, 커밋 4eb9215)
 - Live Translate는 **연속 생성** — `turnComplete` 비신뢰 → delta 누적에 dedup/무음폴백/길이분절 방어 필수
+- 자막은 **누적·세그먼트 양 경로 모두 roll-up 통일**, 무음 정리는 **STT heartbeat 기반**(VAD offset 비의존), 글로우는 **클립→효과** 순서 → [008](specs/008-subtitle-rendering-architecture.md)
 - 릴리스/자동 업데이트는 **Sparkle**로 처리한다([release-guide](ref-docs/claude/release-guide.md))
 
 ---
