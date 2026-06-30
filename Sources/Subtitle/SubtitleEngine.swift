@@ -34,6 +34,11 @@ final class SubtitleEngine {
     /// 길이 기반 break 임계 등 튜닝값을 읽는 설정 저장소(없으면 AppConfig 기본).
     @ObservationIgnored private let settings: SettingsStore?
 
+    /// 확정 줄(roll-up push) 콜백 — 실제로 새 줄이 누적될 때만 호출된다(중복 무시 시 호출 안 함).
+    /// 녹화 기능(SubtitleRecorder)이 이 콜백으로 확정 자막을 파일에 기록한다. 파일 중복 방지를 위해
+    /// confirmTurn/ingestSegment에서 **실 push가 일어난 경우에만** (source, translation)을 전달한다.
+    @ObservationIgnored var onConfirmedLine: ((_ source: String?, _ translation: String) -> Void)?
+
     /// 진단 로그용 Logger(자막 확정 사유/리셋 추적, A3). 민감정보(키) 미포함.
     @ObservationIgnored private let log = Logger(subsystem: AppConfig.bundleIdentifier, category: "Subtitle")
 
@@ -258,6 +263,8 @@ final class SubtitleEngine {
                     if rollupLines.count > Self.maxRollupHistory {
                         rollupLines.removeFirst(rollupLines.count - Self.maxRollupHistory)
                     }
+                    // 실제 push가 일어난 경우에만 녹화 콜백(파일 중복 방지).
+                    onConfirmedLine?(currentSource.isEmpty ? nil : currentSource, collapsed)
                 }
                 currentTranslation = ""   // 진행 중 번역 줄 없음(final-only)
             } else {
@@ -348,6 +355,18 @@ final class SubtitleEngine {
         segmentMode = false
         pendingGenerationReset = false   // generation 경계 상태도 초기화(다음 세션은 깨끗하게 시작)
         isVisible = false
+    }
+
+    /// 서버 인터럽트(`.interrupted`) 수신 시 **진행 중(미확정) 버퍼만** 정리한다.
+    /// `reset()`과 달리 이미 확정되어 누적 표시 중인 rollupLines/confirmed/isVisible은 보존한다 →
+    /// 오디오 재생 중 Gemini가 interrupted를 연발해도 확정 자막이 영구 소실되지 않는다.
+    func clearInterrupted() {
+        log.debug("\(LogTag.subtitle, privacy: .public) 자막 interrupt 정리(진행 줄만 비움, 누적 보존)")
+        silenceTask?.cancel(); silenceTask = nil
+        currentTranslation = ""
+        currentSource = ""
+        pendingGenerationReset = false
+        // rollupLines / confirmedTranslation / confirmedSource / isVisible / silenceClearTask 는 유지
     }
 
     // MARK: - 내부: 누적
@@ -470,6 +489,8 @@ final class SubtitleEngine {
 
         // 확정 직전 정리(charBreak가 반복 구 완성 전에 끊어 잔여가 남는 경우 방지):
         // collapseRepeats(즉시 반복) → dedupGlobalSentences(전역 중복 문장).
+        // 녹화 콜백에 넘길 원문은 버퍼를 비우기 **전에** 캡처한다(확정 시점의 원문 보존).
+        let sourceSnapshot = currentSource
         let collapsed = Self.dedupGlobalSentences(Self.collapseRepeats(currentTranslation))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         currentTranslation = ""
@@ -485,6 +506,8 @@ final class SubtitleEngine {
             if rollupLines.count > Self.maxRollupHistory {
                 rollupLines.removeFirst(rollupLines.count - Self.maxRollupHistory)
             }
+            // 실제 push가 일어난 경우에만 녹화 콜백(파일 중복 방지 — 중복 무시 분기에선 호출 안 함).
+            onConfirmedLine?(sourceSnapshot.isEmpty ? nil : sourceSnapshot, collapsed)
         }
         segmentMode = true
         isVisible = true

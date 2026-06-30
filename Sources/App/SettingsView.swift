@@ -67,6 +67,11 @@ struct SettingsView: View {
     // 번역 오디오 출력 장치 후보 목록(오디오 탭 onAppear/새로고침 시 갱신).
     @State private var outputDevices: [AudioOutputDevice] = []
 
+    /// 현재 시스템 기본 출력 장치가 덕킹(마스터 볼륨 조절)을 지원하는지 + 그 장치 이름.
+    /// 미지원이면 덕킹 토글을 disable하고 도움말을 노출한다.
+    @State private var duckingSupported = true
+    @State private var defaultOutputName = ""
+
     var body: some View {
         NavigationSplitView {
             // 사이드바: 8개 카테고리 목록. selection은 Optional 바인딩.
@@ -91,6 +96,7 @@ struct SettingsView: View {
             refreshPermissions()
             refreshScreens()
             outputDevices = AudioDeviceEnumerator.outputDevices()
+            refreshDuckingState()
         }
     }
 
@@ -289,6 +295,7 @@ struct SettingsView: View {
             }
             audioSection
                 .disabled(!audioCapable)
+                .onAppear { refreshDuckingState() }   // 오디오 탭 진입 시 덕킹 지원 여부 최신화
         }
         .formStyle(.grouped)
     }
@@ -296,6 +303,7 @@ struct SettingsView: View {
     private var monitorTab: some View {
         Form {
             monitorSection
+            recordingSection
         }
         .formStyle(.grouped)
     }
@@ -521,6 +529,39 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - 자막 녹화 (파일 저장)
+
+    /// 녹화 디렉토리 표시 + 변경. 제어 HUD '녹화' 토글이 ON일 때 이 폴더에 자막 파일을 저장한다.
+    private var recordingSection: some View {
+        let settings = appState.settings
+        return Section("자막 녹화") {
+            LabeledContent("저장 폴더") {
+                Text(settings.recordingDirectory)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Button("변경…") { chooseRecordingDirectory() }
+            Text("제어 HUD의 ‘녹화’ 토글을 켜면 이 폴더에 확정된 자막이 [시각] 원문 → 번역문 형식으로 저장됩니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// NSOpenPanel로 녹화 디렉토리를 선택한다(폴더만, 생성 허용). 선택 시 설정에 영속.
+    private func chooseRecordingDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "선택"
+        panel.directoryURL = URL(fileURLWithPath: appState.settings.recordingDirectory, isDirectory: true)
+        if panel.runModal() == .OK, let url = panel.url {
+            appState.settings.recordingDirectory = url.path
+        }
+    }
+
     // MARK: - 비용 (M2b, 태스크 C, 스펙 §9.4)
 
     private var costSection: some View {
@@ -580,6 +621,7 @@ struct SettingsView: View {
                         if newValue && wasOff {
                             appState.audio.selectSystemTap()   // 입력 → 직접 캡쳐(피드백 방지)
                             outputDevices = AudioDeviceEnumerator.outputDevices()
+                            refreshDuckingState()               // 현재 출력 장치의 덕킹 지원 여부 갱신
                             showAudioOutputWarning = true       // 경고 팝업
                         }
                         appState.applyAudioOutputPolicy()
@@ -603,6 +645,7 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                     Button("출력 장치 새로고침") {
                         outputDevices = AudioDeviceEnumerator.outputDevices()
+                        refreshDuckingState()   // 기본 출력 장치 변경 시 덕킹 지원 여부도 갱신
                     }
                 }
 
@@ -628,7 +671,16 @@ struct SettingsView: View {
 
             Section("원문(시스템) 오디오") {
                 // B3: .disabled 제거 — 토글 색상으로 on/off가 항상 구분되게 한다.
+                // 단, 기본 출력 장치가 볼륨 조절을 지원하지 않으면 덕킹이 동작하지 않으므로 토글을 비활성화한다.
                 Toggle("원문 볼륨 덕킹", isOn: audioBinding(\.originalAudioDuckingEnabled))
+                    .disabled(!duckingSupported)
+
+                // 미지원 장치 안내: 어떤 장치가 문제인지 + 해결 방법을 보여준다.
+                if !duckingSupported {
+                    Text("현재 시스템 출력 장치 ‘\(defaultOutputName)’는 볼륨 조절을 지원하지 않아 원문 덕킹을 사용할 수 없습니다. 시스템 설정 > 사운드에서 볼륨 조절이 가능한 출력 장치로 변경하세요.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
                 VStack(alignment: .leading) {
                     // B3: .disabled 제거 — 덕킹 off여도 값 미리 설정 가능.
@@ -641,9 +693,12 @@ struct SettingsView: View {
                     LabeledContent("원문 볼륨", value: "\(Int(settings.originalAudioDuckVolume * 100))%")
                 }
 
-                Text("번역 오디오도 같은 출력 장치로 나가므로 원문 볼륨을 낮추면 번역 소리도 함께 작아집니다. 0%로 두면 번역도 들리지 않습니다. (macOS는 앱별 볼륨 제어를 지원하지 않습니다.)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                // 지원 장치에서만 보상 설명을 노출한다(미지원 시엔 위 주황 도움말만 보여 혼동 방지).
+                if duckingSupported {
+                    Text("원문 볼륨을 낮추면 같은 출력 장치라도 번역 소리는 자동 보상되어 설정한 번역 볼륨으로 유지됩니다. 번역 볼륨 슬라이더로 번역을 더 강조할 수 있습니다. (보상이 과하면 약간의 음질 저하가 있을 수 있어 최대 4배로 제한됩니다.) 별도 출력 장치를 선택하면 보상 없이 그 장치 볼륨으로 재생됩니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .alert("번역 오디오 재생", isPresented: $showAudioOutputWarning) {
@@ -1083,6 +1138,12 @@ struct SettingsView: View {
     private func refreshPermissions() {
         micStatus = PermissionHelper.microphoneStatus()
         sysAudioStatus = PermissionHelper.systemAudioStatus()
+    }
+
+    /// 현재 기본 출력 장치의 덕킹 지원 여부 + 장치명을 다시 읽는다(장치 변경/새로고침 대응).
+    private func refreshDuckingState() {
+        duckingSupported = appState.systemAudioDucker.isDuckingSupported()
+        defaultOutputName = appState.systemAudioDucker.currentDefaultOutputDeviceName()
     }
 
     /// 자막 위치 Picker용 화면 목록을 다시 읽는다(모니터 연결/해제 대응).

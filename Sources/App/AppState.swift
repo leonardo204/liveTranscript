@@ -46,6 +46,13 @@ final class AppState {
     /// 번역 출력 오디오 재생기(M3+). Gemini 출력 오디오(24kHz)를 스피커로 스트리밍.
     let translatedAudioPlayer = TranslatedAudioPlayer()
 
+    /// 자막 녹화기. 확정 자막을 텍스트 파일에 타임스탬프와 함께 기록한다.
+    let recorder = SubtitleRecorder()
+
+    /// 녹화 진행 여부(@Observable이라 HUD 토글이 즉시 반응). 토글 ON은 파일 입력/확인을 거쳐
+    /// 성공 시에만 true가 되고, 세션 정지/토글 OFF 시 false로 내려간다.
+    var isRecording: Bool = false
+
     /// 시스템 출력 덕킹(M3+). 번역 재생 중 원문(시스템) 소리를 낮춘다.
     /// 주의: 번역 오디오도 같은 출력 장치로 나가므로 함께 작아진다(설계상 부분 덕킹).
     let systemAudioDucker = SystemAudioDucker()
@@ -161,6 +168,11 @@ final class AppState {
         // 초기 상태 라벨: 키가 없으면 설정 안내를 노출(키 있으면 기존 "연결 안 됨" 유지).
         if !self.apiKeyLoaded {
             self.geminiStatus = "API 키 없음 — 설정에서 Gemini API 키를 입력하세요"
+        }
+        // 확정 자막 줄을 녹화기로 중계: 녹화 중일 때만 파일에 기록한다(중복 push는 콜백이 안 옴).
+        subtitles.onConfirmedLine = { [weak self] source, translation in
+            guard let self, self.isRecording else { return }
+            self.recorder.writeLine(source: source, translation: translation)
         }
         // 제어 HUD가 시작/정지·설정 버튼을 호출할 수 있도록 배선(self 완성 후).
         self.hud.bind(appState: self)
@@ -446,6 +458,11 @@ final class AppState {
         systemAudioDucker.restore()
         // 누수 위생(spec 004 §7.13.3): 정지 시 자막 누적/dedup 버퍼도 비운다(잔류 방지).
         subtitles.reset()
+        // 세션 정지 시 녹화도 자동 종료한다(파일 닫고 토글 OFF).
+        if isRecording {
+            recorder.stop()
+            isRecording = false
+        }
         // 정지 라벨은 영구 실패 사유가 있으면 그것을 우선 노출(best-effort).
         if let reason = lastFailureReason {
             geminiStatus = reason
@@ -644,7 +661,9 @@ final class AppState {
             // 서버가 진행 중 응답을 인터럽트 → 진행 중 자막/번역 오디오를 즉시 정리한다.
             // 끊긴 응답의 잔재(자막 누적/스케줄된 오디오)가 다음 발화에 섞이지 않도록 한다.
             log.info("\(LogTag.appState, privacy: .public) event.interrupted → 진행 중 자막/오디오 정리")
-            subtitles.reset()
+            // reset()이 아니라 clearInterrupted(): 진행 중(미확정) 버퍼만 비우고 누적된 확정 자막은 보존한다.
+            // 오디오 재생 ON 시 재생음 재입력으로 Gemini가 interrupted를 연발해도 자막이 영구 소실되지 않는다.
+            subtitles.clearInterrupted()
             translatedAudioPlayer.flush()
         case .permanentFailure(let reason):
             // 영구 실패 → 의도를 정지로 돌리고 reconciler에 정리를 맡긴다(직렬 안전).
@@ -674,6 +693,119 @@ final class AppState {
         settingsWindow.show()
     }
 
+    // MARK: - 자막 녹화 (파일 저장)
+
+    /// 제어 HUD '녹화' 토글이 호출. 녹화 중이면 중지, 아니면 파일명/충돌 처리 후 녹화를 시작한다.
+    ///
+    /// NSAlert/NSOpenPanel은 메인 액터에서 동기 모달(`runModal`)로 처리한다(이 메서드는 @MainActor).
+    /// 사용자가 파일명 입력을 취소하면 `isRecording`을 false로 유지해 HUD 토글이 자동 원복된다
+    /// (성공 시에만 true로 만든다 — toggleRecording 내부 가드로 자연 충족).
+    func toggleRecording() {
+        if isRecording {                       // 이미 녹화 중 → 중지
+            recorder.stop()
+            isRecording = false
+            log.info("\(LogTag.appState, privacy: .public) 녹화 중지")
+            return
+        }
+
+        // 1) 파일 이름 입력.
+        guard let rawName = promptRecordingFileName() else {
+            log.info("\(LogTag.appState, privacy: .public) 녹화 시작 취소(파일명 입력 취소)")
+            return   // 취소 → isRecording false 유지
+        }
+        // 파일명 정리: 공백 제거 + 확장자 없으면 .txt 부가.
+        var fileName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if fileName.isEmpty { fileName = "liveTranslate.txt" }
+        if (fileName as NSString).pathExtension.isEmpty {
+            fileName += ".txt"
+        }
+
+        // 2) 디렉토리 준비(없으면 생성).
+        let dir = settings.recordingDirectory
+        let dirURL = URL(fileURLWithPath: dir, isDirectory: true)
+        var isDir: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: dir, isDirectory: &isDir) || !isDir.boolValue {
+            do {
+                try FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+            } catch {
+                presentRecordingError("녹화 폴더를 만들 수 없습니다: \(error.localizedDescription)")
+                isRecording = false
+                return
+            }
+        }
+        let fullURL = dirURL.appendingPathComponent(fileName)
+
+        // 3) 동일 파일 존재 시 이어붙이기/새로 쓰기/취소 선택.
+        let append: Bool
+        if FileManager.default.fileExists(atPath: fullURL.path) {
+            switch promptRecordingFileConflict(fileName: fileName) {
+            case .append:    append = true
+            case .overwrite: append = false
+            case .cancel:
+                log.info("\(LogTag.appState, privacy: .public) 녹화 시작 취소(파일 충돌 취소)")
+                return   // 취소 → isRecording false 유지
+            }
+        } else {
+            append = false
+        }
+
+        // 4) 녹화 시작 — 성공 시에만 토글 ON.
+        do {
+            try recorder.start(url: fullURL, append: append)
+            isRecording = true
+            log.info("\(LogTag.appState, privacy: .public) 녹화 시작 성공(append=\(append, privacy: .public))")
+        } catch {
+            presentRecordingError("녹화를 시작할 수 없습니다: \(error.localizedDescription)")
+            isRecording = false
+        }
+    }
+
+    /// 녹화 파일 충돌 처리 선택지.
+    private enum RecordingConflictChoice { case append, overwrite, cancel }
+
+    /// 녹화 파일명 입력 다이얼로그(기본값 "liveTranslate.txt"). 취소 시 nil.
+    private func promptRecordingFileName() -> String? {
+        let alert = NSAlert()
+        alert.messageText = "녹화 파일 이름"
+        alert.informativeText = "확정된 자막을 저장할 파일 이름을 입력하세요."
+        alert.addButton(withTitle: "확인")
+        alert.addButton(withTitle: "취소")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = "liveTranslate.txt"
+        alert.accessoryView = field
+        // 입력 필드에 키 포커스를 주어 바로 타이핑 가능하게 한다.
+        alert.window.initialFirstResponder = field
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return nil }
+        return field.stringValue
+    }
+
+    /// 동일 파일 존재 시 이어붙이기/새로 쓰기/취소를 묻는다.
+    private func promptRecordingFileConflict(fileName: String) -> RecordingConflictChoice {
+        let alert = NSAlert()
+        alert.messageText = "이미 같은 파일이 있습니다"
+        alert.informativeText = "‘\(fileName)’ 파일이 이미 있습니다. 어떻게 할까요?"
+        alert.addButton(withTitle: "이어붙이기")   // .alertFirstButtonReturn
+        alert.addButton(withTitle: "새로 쓰기")     // .alertSecondButtonReturn
+        alert.addButton(withTitle: "취소")          // .alertThirdButtonReturn
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:  return .append
+        case .alertSecondButtonReturn: return .overwrite
+        default:                       return .cancel
+        }
+    }
+
+    /// 녹화 오류를 사용자에게 알린다(키/민감값 미포함 — localizedDescription만).
+    private func presentRecordingError(_ message: String) {
+        log.error("\(LogTag.appState, privacy: .public) 녹화 오류: \(message, privacy: .public)")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "녹화 오류"
+        alert.informativeText = message
+        alert.addButton(withTitle: "확인")
+        alert.runModal()
+    }
+
     // MARK: - 번역 오디오 출력/덕킹 (M3+)
 
     /// 현재 설정 + 실행 상태를 플레이어/덕커/클라이언트에 반영한다.
@@ -688,12 +820,25 @@ final class AppState {
         if settings.translatedAudioPlaybackEnabled, isRunning {
             log.info("\(LogTag.appState, privacy: .public) applyAudioOutputPolicy: 분기=start (재생 시작 + 덕킹 적용)")
             translatedAudioPlayer.volume = Float(settings.translatedAudioVolume)
+            // 보상 게인: 번역이 기본 출력 장치를 공유(별도 출력 장치 미지정)하고 덕킹이 켜져 있으면,
+            // 마스터 덕킹분(duck)을 소프트웨어로 보상해 번역은 설정 볼륨대로 유지되게 한다.
+            // 별도 출력 장치로 라우팅하면 그 장치는 덕킹 대상이 아니므로 보상하지 않는다(게인 1.0).
+            let sharesDefaultOutput = (settings.translatedAudioOutputDeviceUID == nil)
+            // 현재 기본 출력 장치가 마스터 볼륨 조절(=덕킹)을 지원하는지. 미지원(일부 aggregate/가상
+            // 출력)이면 실제 덕킹이 생략되므로, 보상 게인도 적용하지 않아 번역만 과증폭되는 것을 막는다.
+            let canDuck = systemAudioDucker.isDuckingSupported()
+            let duckActive = settings.originalAudioDuckingEnabled && canDuck
+            let duck = max(Float(settings.originalAudioDuckVolume), 0.1)   // 0 division 방지
+            let maxGain: Float = 4.0
+            let gain: Float = (sharesDefaultOutput && duckActive) ? min(maxGain, 1.0 / duck) : 1.0
+            translatedAudioPlayer.outputGain = gain
+            log.info("\(LogTag.appState, privacy: .public) applyAudioOutputPolicy: 보상게인=\(gain) (공유출력=\(sharesDefaultOutput) 덕킹=\(duckActive) canDuck=\(canDuck) duck=\(duck))")
             // 설정된 출력 장치로 라우팅(시작 직전 반영 — nil이면 시스템 기본).
             translatedAudioPlayer.setOutputDevice(uid: settings.translatedAudioOutputDeviceUID)
             translatedAudioPlayer.start()
             syncPlaybackEnabled(true)   // provider nil이면 내부 가드로 no-op.
-            // 덕킹: on이면 원문(과 번역) 출력을 함께 낮춘다, off면 복원.
-            if settings.originalAudioDuckingEnabled {
+            // 덕킹: on이고 장치가 볼륨 조절을 지원할 때만 원문(과 번역) 출력을 낮춘다, 그 외엔 복원.
+            if settings.originalAudioDuckingEnabled && canDuck {
                 systemAudioDucker.duck(to: Float(settings.originalAudioDuckVolume))
             } else {
                 systemAudioDucker.restore()
@@ -702,6 +847,7 @@ final class AppState {
             log.info("\(LogTag.appState, privacy: .public) applyAudioOutputPolicy: 분기=stop (재생 중지 + 볼륨 복원)")
             // 재생 off거나 정지 상태: 재생 중지 + 볼륨 복원 + provider 디코드 중단.
             translatedAudioPlayer.stop()
+            translatedAudioPlayer.outputGain = 1.0   // 보상 게인 리셋(다음 재생이 깨끗하게 시작).
             systemAudioDucker.restore()
             syncPlaybackEnabled(false)   // provider nil이면 내부 가드로 no-op.
         }
