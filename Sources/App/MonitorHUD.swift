@@ -174,6 +174,19 @@ struct MonitorHUD: View {
             .buttonStyle(.borderedProminent)
             .tint(appState.isRunning ? .red : .accentColor)
 
+            // 녹화 토글: ON 시 확정 자막을 파일로 기록. 녹화 중이면 빨강 tint로 구분.
+            // 파일명 입력을 취소하면 toggleRecording이 isRecording=false를 유지하므로 토글이 자동 원복된다.
+            Toggle(isOn: Binding(
+                get: { appState.isRecording },
+                set: { _ in appState.toggleRecording() }
+            )) {
+                Image(systemName: appState.isRecording ? "record.circle.fill" : "record.circle")
+                    .font(.system(size: 11))
+            }
+            .toggleStyle(.button)
+            .tint(appState.isRecording ? .red : .accentColor)
+            .help(appState.isRecording ? "녹화 중지" : "자막 녹화 시작")
+
             Button {
                 appState.openSettings()
             } label: {

@@ -86,6 +86,14 @@ final class SettingsStore {
         static let translatedAudioOutputDeviceUID = "audio.playback.outputDeviceUID"
         static let originalAudioDuckingEnabled = "audio.duck.enabled"
         static let originalAudioDuckVolume = "audio.duck.volume"
+        // 자막 녹화 디렉토리(파일 저장 위치) — 기본 사용자 Documents.
+        static let recordingDirectory = "recording.directory"
+    }
+
+    /// 녹화 기본 디렉토리(사용자 Documents, 없으면 홈). register/로드/리셋 공용 계산값.
+    static var defaultRecordingDirectory: String {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path
+            ?? NSHomeDirectory()
     }
 
     /// 번역 오디오 출력/덕킹 기본값(리셋 시에도 동일 사용). 결정적 상수만.
@@ -151,6 +159,8 @@ final class SettingsStore {
             Key.translatedAudioVolume: AudioDefault.volume,
             Key.originalAudioDuckingEnabled: AudioDefault.duckingEnabled,
             Key.originalAudioDuckVolume: AudioDefault.duckVolume,
+            // 녹화 디렉토리 기본값(사용자 Documents). init 시 1회 계산값으로 충분.
+            Key.recordingDirectory: SettingsStore.defaultRecordingDirectory,
         ])
         self.monitorEnabled = defaults.bool(forKey: Key.monitorEnabled)
         self.monitorAutoShowOnCapture = defaults.bool(forKey: Key.monitorAutoShowOnCapture)
@@ -199,6 +209,9 @@ final class SettingsStore {
         self.originalAudioDuckVolume = defaults.double(forKey: Key.originalAudioDuckVolume)
         // 출력 장치 UID 복원(미설정이면 nil = 시스템 기본 출력).
         self.translatedAudioOutputDeviceUID = defaults.string(forKey: Key.translatedAudioOutputDeviceUID)
+        // 녹화 디렉토리 복원(미설정이면 Documents 폴백).
+        self.recordingDirectory =
+            defaults.string(forKey: Key.recordingDirectory) ?? SettingsStore.defaultRecordingDirectory
 
         // 설정 로드 체크포인트(spec 006 §4.1): 해석된 실제값 1줄. 키/민감값 미포함.
         let inputSelLabel = loadInputSelection().map(Self.inputSelectionLabel) ?? "(미설정)"
@@ -486,6 +499,14 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - 자막 녹화 (파일 저장)
+
+    /// 자막 녹화 파일을 저장할 디렉토리 경로(기본 사용자 Documents).
+    /// 설정 "녹화 > 변경…"에서 NSOpenPanel로 선택한 폴더 경로가 영속된다. 경로 평문은 로그하지 않는다.
+    var recordingDirectory: String {
+        didSet { defaults.set(recordingDirectory, forKey: Key.recordingDirectory) }
+    }
+
     // MARK: - 번역 (M2a)
 
     /// 번역 대상 언어 코드(BCP-47, 기본 ko). GeminiLiveClient setup에 사용.
@@ -601,6 +622,7 @@ final class SettingsStore {
             Key.translatedAudioPlaybackEnabled, Key.translatedAudioVolume,
             Key.translatedAudioOutputDeviceUID,
             Key.originalAudioDuckingEnabled, Key.originalAudioDuckVolume,
+            Key.recordingDirectory,
         ]
         for key in allKeys { defaults.removeObject(forKey: key) }
 
@@ -630,5 +652,6 @@ final class SettingsStore {
         translatedAudioOutputDeviceUID = nil   // 시스템 기본 출력으로 복귀
         originalAudioDuckingEnabled = AudioDefault.duckingEnabled
         originalAudioDuckVolume = AudioDefault.duckVolume
+        recordingDirectory = SettingsStore.defaultRecordingDirectory
     }
 }
