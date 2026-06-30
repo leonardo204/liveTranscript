@@ -54,6 +54,11 @@ final class TranslatedAudioPlayer {
         engine.connect(player, to: engine.mainMixerNode, format: format) // 믹서가 하드웨어 SR로 변환
     }
 
+    /// 마스터 덕킹분 보상용 소프트웨어 게인(1.0=무증폭). 번역이 기본 출력 장치를 공유할 때
+    /// 원문 덕킹으로 함께 작아진 번역 음량을 PCM 단계에서 곱으로 되살린다. enqueue가
+    /// MainActor에서 호출되므로 동기화 부담 없음. player.volume(믹서)과 곱으로 합쳐져 최종 음량.
+    var outputGain: Float = 1.0
+
     /// 소프트웨어 재생 볼륨(0...1). 시스템 출력 볼륨과 별개.
     var volume: Float {
         get { player.volume }
@@ -216,8 +221,19 @@ final class TranslatedAudioPlayer {
         let ch = buf.floatChannelData![0]
         data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             let p = raw.bindMemory(to: Int16.self)
-            for i in 0..<frameCount {
-                ch[i] = max(-1, min(1, Float(Int16(littleEndian: p[i])) / 32768.0))
+            let g = outputGain
+            if g <= 1.0001 {
+                // 무증폭(보상 없음/별도 장치): 기존 경로 — 왜곡 없는 선형 + 하드클립.
+                for i in 0..<frameCount {
+                    ch[i] = max(-1, min(1, Float(Int16(littleEndian: p[i])) / 32768.0))
+                }
+            } else {
+                // 게인 보상: 증폭 후 tanh 소프트 리미터로 피크를 ±1 내로 부드럽게 압축
+                // (하드웨어 클리핑/거친 왜곡 방지).
+                for i in 0..<frameCount {
+                    let s = Float(Int16(littleEndian: p[i])) / 32768.0 * g
+                    ch[i] = tanhf(s)
+                }
             }
         }
         // completionHandler는 렌더 스레드(비-MainActor)에서 호출된다. self/MainActor 격리 위반과

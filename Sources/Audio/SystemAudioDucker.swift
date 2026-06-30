@@ -80,6 +80,22 @@ final class SystemAudioDucker {
         }
     }
 
+    /// 현재 시스템 기본 출력 장치가 마스터 볼륨 조절(=덕킹)을 지원하는지.
+    /// 볼륨 스칼라 속성이 존재하고 설정 가능해야 한다(일부 aggregate/가상 출력은 미지원).
+    func isDuckingSupported() -> Bool {
+        guard let dev = defaultOutputDevice() else { return false }
+        var addr = volumeAddress()
+        guard AudioObjectHasProperty(dev, &addr) else { return false }
+        var settable = DarwinBoolean(false)
+        return AudioObjectIsPropertySettable(dev, &addr, &settable) == noErr && settable.boolValue
+    }
+
+    /// 현재 시스템 기본 출력 장치의 사람이 읽는 이름(도움말 표시용). 없으면 "(없음)".
+    func currentDefaultOutputDeviceName() -> String {
+        guard let dev = defaultOutputDevice() else { return "(없음)" }
+        return defaultOutputDeviceName(dev)
+    }
+
     /// 저장해 둔 원래 볼륨으로 복원한다(없으면 무시).
     func restore() {
         if let v = savedVolume {
